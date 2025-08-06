@@ -9,6 +9,7 @@ Developed by Leo Kuroshita for Hugelton Instruments
 - Creates pad cutouts based on SMD pads
 - Adds alignment pin holes based on circles on User.7 layer
 - Outputs an OpenSCAD file for easy customization and 3D printing
+- Automatically opens the output folder after generation for quick access
 
 ## Installation
 
@@ -23,13 +24,13 @@ Developed by Leo Kuroshita for Hugelton Instruments
 In the `__init__.py` program you can tweak some settings to your needs.
 <pre>
 # === Global configuration ===
-BUILD = "109"            # Build number
+BUILD = "118"            # Build number
 workDir = "stencil"      # Working folder name
 front_copper_pads = True # Generate front copper pads
 back_copper_pads = False # Generate back copper pads
 min_mask_width = 0.40    # Minimum mask width (mm) between pads
 min_pad_size = 0.40      # Minimum pad size (mm) after shrinking
-pcbClearence = 0.15      # PCB clearance (mm) - moves outline outward from Edge.Cuts
+pcbClearance = 0.15      # PCB clearance (mm) - moves outline outward from Edge.Cuts
 </pre>
 
 ## Usage
@@ -45,6 +46,7 @@ pcbClearence = 0.15      # PCB clearance (mm) - moves outline outward from Edge.
    - A parameter dialog will appear where you can configure settings interactively
    - Alternatively, you can modify the default values in the `__init__.py` file
 5. The plugin will create a working directory ("/stencil" defined in the `__init__.py` program) in the same directory as your PCB file and then generate an OpenSCAD file in that directory.
+   - The stencil folder will automatically open in your file explorer after generation
 6. Open the generated OpenSCAD file to customize parameters if needed.
 7. Render and export the stencil as an STL file for 3D printing.
 

@@ -10,7 +10,7 @@ import os
 
 
 # === Global configuration ===
-BUILD = "117"            # Build number
+BUILD = "118"            # Build number
 workDir = "stencil"      # Working folder name
 front_copper_pads = True # Generate front copper pads
 back_copper_pads = False # Generate back copper pads
@@ -151,6 +151,21 @@ class StencilGenerator(pcbnew.ActionPlugin):
             pcbnew.Refresh()
             print(f"OpenSCAD file generated: {output_filename}")
             log("Script completed successfully")
+            
+            # Open the stencil folder in file explorer
+            import subprocess
+            import platform
+            system = platform.system()
+            try:
+                if system == 'Darwin':  # macOS
+                    subprocess.run(['open', output_dir])
+                elif system == 'Windows':
+                    subprocess.run(['explorer', output_dir])
+                elif system == 'Linux':
+                    subprocess.run(['xdg-open', output_dir])
+                log(f"Opened stencil folder: {output_dir}")
+            except Exception as e:
+                log(f"Could not open folder automatically: {e}")
     
         except Exception as e:
             msg = f"ERROR in Run(): {repr(e)}"
