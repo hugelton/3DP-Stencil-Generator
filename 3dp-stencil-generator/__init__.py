@@ -7,6 +7,7 @@ import pcbnew
 import re
 import datetime
 import os
+import configparser
 
 
 # === Global configuration ===
@@ -20,6 +21,67 @@ min_pad_size = 0.40      # Minimum pad size (mm) after shrinking
 pcbClearence = 0.15      # PCB clearance (mm) - moves outline outward from Edge.Cuts
 
 import wx
+
+def load_config_from_ini(project_dir):
+    """Load configuration from 3dpStencil.ini file"""
+    global min_mask_width, min_pad_size, pcbClearence
+    
+    config_file = os.path.join(project_dir, workDir, "3dpStencil.ini")
+    
+    if not os.path.exists(config_file):
+        return  # Use default values
+    
+    try:
+        config = configparser.ConfigParser()
+        config.read(config_file, encoding='utf-8')
+        
+        if 'StencilSettings' in config:
+            settings = config['StencilSettings']
+            
+            # Load values with validation
+            if 'min_mask_width' in settings:
+                value = float(settings['min_mask_width'])
+                if 0.01 <= value <= 5.0:  # Reasonable range
+                    min_mask_width = value
+            
+            if 'min_pad_size' in settings:
+                value = float(settings['min_pad_size'])
+                if 0.01 <= value <= 10.0:  # Reasonable range
+                    min_pad_size = value
+            
+            if 'pcb_clearance' in settings:
+                value = float(settings['pcb_clearance'])
+                if 0.0 <= value <= 2.0:  # Reasonable range
+                    pcbClearence = value
+                    
+    except Exception as e:
+        # If any error occurs, just use default values
+        print(f"Warning: Could not load config from {config_file}: {e}")
+
+def save_config_to_ini(project_dir, mask_width, pad_size, clearance):
+    """Save configuration to 3dpStencil.ini file"""
+    config_dir = os.path.join(project_dir, workDir)
+    config_file = os.path.join(config_dir, "3dpStencil.ini")
+    
+    try:
+        # Ensure directory exists
+        os.makedirs(config_dir, exist_ok=True)
+        
+        # Create config
+        config = configparser.ConfigParser()
+        config['StencilSettings'] = {
+            'min_mask_width': str(mask_width),
+            'min_pad_size': str(pad_size),
+            'pcb_clearance': str(clearance)
+        }
+        
+        # Write config file
+        with open(config_file, 'w', encoding='utf-8') as f:
+            config.write(f)
+            
+    except Exception as e:
+        # Don't crash if we can't save config
+        print(f"Warning: Could not save config to {config_file}: {e}")
 
 class StencilParametersDialog(wx.Dialog):
     def __init__(self, parent):
@@ -61,19 +123,21 @@ class StencilParametersDialog(wx.Dialog):
         """Return the values from the dialog"""
         try:
             copper_selection = self.copper_side_rb.GetSelection()
+            mask_width = float(self.mask_width_ctrl.GetValue())
+            pad_size = float(self.pad_size_ctrl.GetValue())
+            clearance = float(self.clearance_ctrl.GetValue())
+            
             return {
                 'copper_selection': copper_selection,
                 'front_copper_pads': copper_selection == 0,
                 'back_copper_pads': copper_selection == 1,
-                'min_mask_width': float(self.mask_width_ctrl.GetValue()),
-                'min_pad_size': float(self.pad_size_ctrl.GetValue()),
-                'pcb_clearance': float(self.clearance_ctrl.GetValue())
+                'min_mask_width': mask_width,
+                'min_pad_size': pad_size,
+                'pcb_clearance': clearance
             }
         except ValueError:
             wx.MessageBox("Please enter valid numbers for all numeric fields!", "Error")
             return None
-
-
 
 class StencilGenerator(pcbnew.ActionPlugin):
     def defaults(self):
@@ -109,28 +173,36 @@ class StencilGenerator(pcbnew.ActionPlugin):
         try:
             board = pcbnew.GetBoard()
             project_file = board.GetFileName()
-    
+
             if not project_file:
                 raise RuntimeError("No board file loaded")
-    
+
             project_dir = os.path.dirname(project_file)
             output_dir = os.path.join(project_dir, workDir)
             os.makedirs(output_dir, exist_ok=True)
-    
+
             log_file = os.path.join(output_dir, "kicad_stencilgen_debug.log")
-   
+
             def log(msg):
                 with open(log_file, "a", encoding="utf-8") as f:
                     f.write(f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - {msg}\n")
-    
+
             log(f"===== Plugin started - BUILD {BUILD} =====")
             log(f"Project directory: {project_dir}")
 
-            # Show parameter dialog first
+            # Load configuration from INI file
+            load_config_from_ini(project_dir)
+            log(f"Config loaded - mask_width: {min_mask_width}, pad_size: {min_pad_size}, clearance: {pcbClearence}")
+
+            # Show parameter dialog
             log("Showing parameters dialog")
             if not self.show_parameters_dialog():
                 log("Parameters dialog cancelled, exiting")
                 return  # User cancelled, exit
+
+            # Save configuration to INI file
+            save_config_to_ini(project_dir, min_mask_width, min_pad_size, pcbClearence)
+            log("Configuration saved to INI file")
 
             base_filename = re.sub(r'\.[^.]*$', '', os.path.basename(project_file))
             # Gebruik nu copper_selection voor de bestandsnaam
@@ -146,7 +218,7 @@ class StencilGenerator(pcbnew.ActionPlugin):
             with open(output_filename, 'w', encoding='utf-8') as f:
                 f.write(self.generate_openscad(board))
                 log(f"SCAD file written: {output_filename}")
-    
+
             pcbnew.Refresh()
             print(f"OpenSCAD file generated: {output_filename}")
             log("Script completed successfully")
@@ -165,15 +237,16 @@ class StencilGenerator(pcbnew.ActionPlugin):
                 log(f"Opened stencil folder: {output_dir}")
             except Exception as e:
                 log(f"Could not open folder automatically: {e}")
-    
+
         except Exception as e:
             msg = f"ERROR in Run(): {repr(e)}"
             try:
                 with open(log_file, "a", encoding="utf-8") as f:
-                    f.write(f"{datetime.datetime.now()} - {msg}\n")
+                    f.write(f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - {msg}\n")
             except:
                 print("Error writing to log file.")
             print(msg)
+
 
     def generate_openscad(self, board):
         # Haal bestandsnaam op

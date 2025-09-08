@@ -40,13 +40,58 @@ pcbClearance = 0.15      # PCB clearance (mm) - moves outline outward from Edge.
   - 2.1. Draw a rectangle on User.4 layer to define the PCB outline.
   - 2.2. If no User.4 layer is present, or if it doesn’t contain a rectangle, the PCB outline is derived from the Edge.Cuts layer.
 3. (Optional) Draw circles on User.2 layer to define alignment pin positions.
-4. Click the ![icon](https://github.com/hugelton/3DP-Stencil-Generator/blob/99ac4820377e08e7fa33e80fa1f7343ff17766b6/3dp-stencil-generator/icon.png)"3D Printable Stencil Generator" button in the toolbar.
-   - A parameter dialog will appear where you can configure settings interactively
+4. Click the "3D Printable Stencil Generator" button in the toolbar.
+    ![icon](./images/icon.png)
+
+  - A parameter dialog will appear where you can configure settings interactively
+
+    <img src="./images/dialog.png" alt="Dialoog" width="400">
+
+  - Changes in the Dialog will be saved and used until changed again.
+
    - Alternatively, you can modify the default values in the `__init__.py` file
 5. The plugin will create a working directory ("/stencil" defined in the `__init__.py` program) in the same directory as your PCB file and then generate an OpenSCAD file in that directory.
    - The stencil folder will automatically open in your file explorer after generation
 6. Open the generated OpenSCAD file to customize parameters if needed.
 7. Render and export the stencil as an STL file for 3D printing.
+
+## Galery
+
+<figure style="text-align: center; margin: 0 auto;">
+  <img src="./images/stencilTest_stencil_B.png" alt="Stencil Back" width="600">
+  <figcaption>Stencil for the back-side of the PCB</figcaption>
+</figure>
+<p>
+<figure style="text-align: center; margin: 0 auto;">
+  <img src="./images/stencilTest_stencil_F.png" alt="Stencil Front" width="600">
+  <figcaption>Stencil for the front-side of the PCB</figcaption>
+</figure>
+<p>
+<figure style="text-align: center; margin: 0 auto;">
+  <img src="./images/stencilTest_PCB_Front.png" alt="Stencil Back" width="500">
+  <figcaption>Front side of the PCB (this side is flipped when in the stencil)</figcaption>
+</figure>
+<p>
+<figure style="text-align: center; margin: 0 auto;">
+  <img src="./images/stencilTest_PCB_Back.png" alt="Stencil Back" width="500">
+  <figcaption>Back side of the PCB (this side is flipped when in the stencil)</figcaption>
+</figure>
+<p><p>
+<figure style="text-align: center; margin: 0 auto;">
+  <img src="./images/stencilTest_Front.png" alt="Stencil Back" width="500">
+  <figcaption>Front side of the PCB with components</figcaption>
+</figure>
+<p>
+<figure style="text-align: center; margin: 0 auto;">
+  <img src="./images/stencilTest_Back.png" alt="Stencil Back" width="500">
+  <figcaption>Back side of the PCB with components</figcaption>
+</figure>
+<p>
+<p>
+<figure style="text-align: center; margin: 0 auto;">
+  <img src="./images/stencil_with_PCB_BackOnTop.png" alt="Stencil Back" width="800">
+  <figcaption>Stencil with PCB (Front side is downwards)</figcaption>
+</figure>
 
 ## Contributors
 
