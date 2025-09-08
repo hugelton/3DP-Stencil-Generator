@@ -10,7 +10,7 @@ import os
 
 
 # === Global configuration ===
-BUILD = "122"            # Build number
+BUILD = "123"            # Build number
 workDir = "stencil"      # Working folder name
 front_copper_pads = True # Generate front copper pads
 back_copper_pads = False # Generate back copper pads
@@ -77,7 +77,7 @@ class StencilParametersDialog(wx.Dialog):
 
 class StencilGenerator(pcbnew.ActionPlugin):
     def defaults(self):
-        self.name = "3DP Stencil Generator"
+        self.name = "3dp Stencil Generator"
         self.category = "Modify PCB"
         self.description = "Generate OpenSCAD file for 3D printable solder stencil with alignment holes"
         self.show_toolbar_button = True
@@ -121,7 +121,7 @@ class StencilGenerator(pcbnew.ActionPlugin):
    
             def log(msg):
                 with open(log_file, "a", encoding="utf-8") as f:
-                    f.write(f"{datetime.datetime.now()} - {msg}\n")
+                    f.write(f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - {msg}\n")
     
             log(f"===== Plugin started - BUILD {BUILD} =====")
             log(f"Project directory: {project_dir}")
@@ -176,8 +176,20 @@ class StencilGenerator(pcbnew.ActionPlugin):
             print(msg)
 
     def generate_openscad(self, board):
+        # Haal bestandsnaam op
+        project_file = board.GetFileName()
+        base_filename = re.sub(r'\.[^.]*$', '', os.path.basename(project_file))
+        if copper_selection == 0:
+            side_str = "F"
+        elif copper_selection == 1:
+            side_str = "B"
+        else:
+            side_str = ""
+        scad_filename = f"{base_filename}_stencil_{side_str}.scad"
+        
         scad = "// KiCad Stencil Generator\n"
-        scad += f"// Generated on {datetime.datetime.now()}\n\n"
+        scad += f"// Generated on {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        scad += f"// File: {scad_filename}\n\n"
 
         scad += "// Parameters (adjust as needed)\n"
         scad += "stencil_thickness = 0.2;  // mm (Thickness of the stencil)\n"
@@ -443,7 +455,9 @@ class StencilGenerator(pcbnew.ActionPlugin):
                   center_circle = drawing.GetCenter()
                   radius = drawing.GetRadius()
                   cx, cy = self.mm(center_circle.x - center_x), self.mm(center_circle.y - center_y)
-                  # GEEN spiegeling voor cirkels in PCB outline - deze zijn absolute posities
+                  # Spiegel X-coördinaat voor Back kant (net zoals bij pads)
+                  if back_copper_pads:  # of copper_selection == 1
+                      cx = -cx
                   r = self.mm(radius) + pcbClearence
                   shapes.append(f"translate([{cx}, {cy}]) circle(r={r})")
 
