@@ -10,10 +10,11 @@ import os
 
 
 # === Global configuration ===
-BUILD = "118"            # Build number
+BUILD = "122"            # Build number
 workDir = "stencil"      # Working folder name
 front_copper_pads = True # Generate front copper pads
 back_copper_pads = False # Generate back copper pads
+copper_selection = 0     # 0 = front, 1 = back
 min_mask_width = 0.20    # Minimum mask width (mm) between pads
 min_pad_size = 0.40      # Minimum pad size (mm) after shrinking
 pcbClearence = 0.15      # PCB clearance (mm) - moves outline outward from Edge.Cuts
@@ -23,19 +24,11 @@ import wx
 class StencilParametersDialog(wx.Dialog):
     def __init__(self, parent):
         super().__init__(parent, title="Stencil Generator Parameters")
-        
-        # Create the dialog layout
         sizer = wx.BoxSizer(wx.VERTICAL)
-        
-        # Front copper pads checkbox
-        self.front_copper_cb = wx.CheckBox(self, label="Generate front copper pads")
-        self.front_copper_cb.SetValue(front_copper_pads)  # default value
-        sizer.Add(self.front_copper_cb, 0, wx.ALL, 5)
-        
-        # Back copper pads checkbox
-        self.back_copper_cb = wx.CheckBox(self, label="Generate back copper pads")
-        self.back_copper_cb.SetValue(back_copper_pads)  # default value
-        sizer.Add(self.back_copper_cb, 0, wx.ALL, 5)
+        self.copper_side_rb = wx.RadioBox(
+            self, label="Copper side", choices=["Front", "Back"], majorDimension=1, style=wx.RA_SPECIFY_ROWS)
+        self.copper_side_rb.SetSelection(0 if front_copper_pads else 1)
+        sizer.Add(self.copper_side_rb, 0, wx.ALL, 5)
         
         # Minimum mask width
         sizer.Add(wx.StaticText(self, label="Minimum mask width (mm):"), 0, wx.ALL, 5)
@@ -67,9 +60,11 @@ class StencilParametersDialog(wx.Dialog):
     def get_values(self):
         """Return the values from the dialog"""
         try:
+            copper_selection = self.copper_side_rb.GetSelection()
             return {
-                'front_copper_pads': self.front_copper_cb.GetValue(),
-                'back_copper_pads': self.back_copper_cb.GetValue(),
+                'copper_selection': copper_selection,
+                'front_copper_pads': copper_selection == 0,
+                'back_copper_pads': copper_selection == 1,
                 'min_mask_width': float(self.mask_width_ctrl.GetValue()),
                 'min_pad_size': float(self.pad_size_ctrl.GetValue()),
                 'pcb_clearance': float(self.clearance_ctrl.GetValue())
@@ -93,25 +88,22 @@ class StencilGenerator(pcbnew.ActionPlugin):
         app = wx.App.Get()
         if not app:
             app = wx.App()
-        
         dlg = StencilParametersDialog(None)
-        
         if dlg.ShowModal() == wx.ID_OK:
             values = dlg.get_values()
             if values:
-                # Update global variables with user input
-                global front_copper_pads, back_copper_pads, min_mask_width, min_pad_size, pcbClearence
+                global front_copper_pads, back_copper_pads, min_mask_width, min_pad_size, pcbClearence, copper_selection
+                copper_selection = values['copper_selection']
                 front_copper_pads = values['front_copper_pads']
                 back_copper_pads = values['back_copper_pads']
                 min_mask_width = values['min_mask_width']
                 min_pad_size = values['min_pad_size']
                 pcbClearence = values['pcb_clearance']
-                
                 dlg.Destroy()
-                return True  # User clicked OK
-        
+                return True
         dlg.Destroy()
-        return False  # User cancelled
+        return False
+
 
     def Run(self):
         try:
@@ -140,10 +132,17 @@ class StencilGenerator(pcbnew.ActionPlugin):
                 log("Parameters dialog cancelled, exiting")
                 return  # User cancelled, exit
 
-    
             base_filename = re.sub(r'\.[^.]*$', '', os.path.basename(project_file))
-            output_filename = os.path.join(output_dir, f"{base_filename}_stencil.scad")
-    
+            # Gebruik nu copper_selection voor de bestandsnaam
+            if copper_selection == 0:
+                side_str = "F"
+            elif copper_selection == 1:
+                side_str = "B"
+            else:
+                side_str = ""
+            output_filename = os.path.join(output_dir, f"{base_filename}_stencil_{side_str}.scad")
+
+            log(f"Output SCAD file: {output_filename}")
             with open(output_filename, 'w', encoding='utf-8') as f:
                 f.write(self.generate_openscad(board))
                 log(f"SCAD file written: {output_filename}")
@@ -194,7 +193,7 @@ class StencilGenerator(pcbnew.ActionPlugin):
 
         scad += self.generate_modules(board)
 
-        scad += "union(){\n"
+        scad += "difference(){\n"
         scad += "stencil();\n"
         scad += "        if (enable_alignment_holes) alignment_holes();\n}"
 
@@ -237,10 +236,10 @@ class StencilGenerator(pcbnew.ActionPlugin):
 
     def calculate_pcb_bounds(self, board):
         """Calculate PCB bounds for frame generation"""
-        # Try User.9 first (preferred method)
-        pcb_rect = self.find_shape_on_layer(board, pcbnew.User_9)
+        # Try User.4 first (preferred method)
+        pcb_rect = self.find_shape_on_layer(board, pcbnew.User_4)
         if pcb_rect:
-            # User.9 rectangle found - use its bounds
+            # User.4 rectangle found - use its bounds
             center_x = pcb_rect[0] + pcb_rect[2]/2
             center_y = pcb_rect[1] + pcb_rect[3]/2
             width = self.mm(pcb_rect[2])
@@ -328,17 +327,17 @@ class StencilGenerator(pcbnew.ActionPlugin):
         }
 
     def generate_frame(self, board):
-        # First, try to find existing rectangle on User.8 layer
-        frame_rect = self.find_shape_on_layer(board, pcbnew.User_8)
+        # First, try to find existing rectangle on User.3 layer
+        frame_rect = self.find_shape_on_layer(board, pcbnew.User_3)
         
         if frame_rect:
-            # User.8 rectangle found - use existing logic
+            # User.3 rectangle found - use existing logic
             scad = f"    linear_extrude(height=frame_height) {{\n"
             scad += f"        square([{self.mm(frame_rect[2])}, {self.mm(frame_rect[3])}], center=true);\n"
             scad += "    }\n"
             return scad
     
-        # User.8 rectangle not found - auto-calculate frame
+        # User.3 rectangle not found - auto-calculate frame
         pcb_bounds = self.calculate_pcb_bounds(board)
         
         # Add 5mm margin on all sides (10mm total to width and height)
@@ -412,51 +411,43 @@ class StencilGenerator(pcbnew.ActionPlugin):
 
     def generate_pcb_outline_from_edge_cuts(self, board):
       """Generate PCB outline from Edge.Cuts layer as a single polygon or union of shapes"""
-      
       log = getattr(self, 'log_function', lambda msg: print(f"DEBUG: {msg}"))
-      
       log("=== Starting Edge.Cuts analysis ===")
-      
-      # Get PCB bounding box for centering
-      pcb_rect = self.find_shape_on_layer(board, pcbnew.User_9)
+
+      pcb_rect = self.find_shape_on_layer(board, pcbnew.User_4)
       if pcb_rect:
           center_x = pcb_rect[0] + pcb_rect[2]/2
           center_y = pcb_rect[1] + pcb_rect[3]/2
-          log(f"Using User.9 center: ({self.mm(center_x)}, {self.mm(center_y)}) mm")
+          log(f"Using User.4 center: ({self.mm(center_x)}, {self.mm(center_y)}) mm")
       else:
           bbox = board.GetBoundingBox()
           center_x = bbox.GetCenter().x
           center_y = bbox.GetCenter().y
           log(f"Using board bbox center: ({self.mm(center_x)}, {self.mm(center_y)}) mm")
-      
-      # Collect all Edge.Cuts elements
+
       shapes = []
       line_segments = []
-      
+
       for drawing in board.GetDrawings():
           if drawing.GetLayer() == pcbnew.Edge_Cuts and isinstance(drawing, pcbnew.PCB_SHAPE):
               shape_type = drawing.GetShape()
-              
+
               if shape_type == pcbnew.SHAPE_T_SEGMENT:
-                  # Collect line segments to form polygon
                   start = drawing.GetStart()
                   end = drawing.GetEnd()
                   x1, y1 = self.mm(start.x - center_x), self.mm(start.y - center_y)
                   x2, y2 = self.mm(end.x - center_x), self.mm(end.y - center_y)
                   line_segments.append([(x1, y1), (x2, y2)])
-                  log(f"Line segment: ({x1}, {y1}) to ({x2}, {y2})")
-                  
+
               elif shape_type == pcbnew.SHAPE_T_CIRCLE:
-                  # Add circle as separate shape with clearance
                   center_circle = drawing.GetCenter()
                   radius = drawing.GetRadius()
                   cx, cy = self.mm(center_circle.x - center_x), self.mm(center_circle.y - center_y)
+                  # GEEN spiegeling voor cirkels in PCB outline - deze zijn absolute posities
                   r = self.mm(radius) + pcbClearence
                   shapes.append(f"translate([{cx}, {cy}]) circle(r={r})")
-                  log(f"Circle: center ({cx}, {cy}), radius {r} (with clearance)")
-                  
+
               elif shape_type == pcbnew.SHAPE_T_RECT:
-                  # Add rectangle as separate shape with clearance
                   start = drawing.GetStart()
                   end = drawing.GetEnd()
                   x1, y1 = self.mm(start.x - center_x), self.mm(start.y - center_y)
@@ -464,76 +455,60 @@ class StencilGenerator(pcbnew.ActionPlugin):
                   w, h = abs(x2 - x1) + 2 * pcbClearence, abs(y2 - y1) + 2 * pcbClearence
                   cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
                   shapes.append(f"translate([{cx}, {cy}]) square([{w}, {h}], center=true)")
-                  log(f"Rectangle: center ({cx}, {cy}), size {w}x{h} (with clearance)")
-                  
+
               elif shape_type == pcbnew.SHAPE_T_ARC:
-                  # Convert arc to polygon approximation
                   center_arc = drawing.GetCenter()
                   start = drawing.GetStart()
                   end = drawing.GetEnd()
-                  
-                  # Calculate arc parameters
+                  import math
                   cx, cy = self.mm(center_arc.x - center_x), self.mm(center_arc.y - center_y)
                   sx, sy = self.mm(start.x - center_x), self.mm(start.y - center_y)
                   ex, ey = self.mm(end.x - center_x), self.mm(end.y - center_y)
-                  
-                  # Calculate radius and angles
-                  import math
                   radius = math.sqrt((sx - cx)**2 + (sy - cy)**2)
                   start_angle = math.atan2(sy - cy, sx - cx)
                   end_angle = math.atan2(ey - cy, ex - cx)
-                  
-                  # Generate arc points (approximate with line segments)
                   arc_points = []
                   num_segments = max(8, int(abs(end_angle - start_angle) * 180 / math.pi / 10))
-                  
                   if end_angle < start_angle:
                       end_angle += 2 * math.pi
-                      
                   for i in range(num_segments + 1):
                       angle = start_angle + (end_angle - start_angle) * i / num_segments
                       x = cx + radius * math.cos(angle)
                       y = cy + radius * math.sin(angle)
                       arc_points.append((x, y))
-                  
-                  # Add arc points to line segments
                   for i in range(len(arc_points) - 1):
                       line_segments.append([arc_points[i], arc_points[i + 1]])
-                  
-                  log(f"Arc: center ({cx}, {cy}), radius {radius}, {num_segments} segments")
-      
-      # Build the final SCAD code
+
       scad = ""
-      
-      # If we have line segments, try to form a closed polygon
       if line_segments:
           polygon_points = self.connect_line_segments(line_segments)
           if polygon_points:
+              # Spiegel X-coordinaat en reverse de volgorde voor Back
+              if back_copper_pads:
+                  polygon_points = [(-x, y) for x, y in polygon_points][::-1]
               points_str = ",".join([f"[{x},{y}]" for x, y in polygon_points])
-              # Apply clearance using offset() for closed polygons
               scad += f"    offset(r={pcbClearence}) polygon(points=[{points_str}]);\n"
-              log(f"Created polygon with {len(polygon_points)} points and {pcbClearence}mm clearance")
           else:
-              # If we can't form a closed polygon, create individual line shapes with clearance
-              log("Could not form closed polygon, using individual line shapes with clearance")
               for segment in line_segments:
                   (x1, y1), (x2, y2) = segment
-                  # Create a thin rectangle for each line segment with increased width for clearance
+                  if back_copper_pads:
+                      x1 = -x1
+                      x2 = -x2
                   length = ((x2-x1)**2 + (y2-y1)**2)**0.5
-                  if length > 0.001:  # Avoid zero-length segments
+                  if length > 0.001:
+                      import math
                       angle = math.atan2(y2-y1, x2-x1) * 180 / math.pi
                       cx, cy = (x1+x2)/2, (y1+y2)/2
                       line_width = 0.1 + 2 * pcbClearence
                       shapes.append(f"translate([{cx}, {cy}]) rotate([0, 0, {angle}]) square([{length}, {line_width}], center=true)")
-      
-      # Add other shapes to union if we have any
+
       if shapes:
-          if scad:  # We already have a polygon
-              scad = f"    union() {{\n        offset(r={pcbClearence}) polygon(points=[{points_str}]);\n"
+          if scad:
+              scad = f"    union() {{\n{scad}"
               for shape in shapes:
                   scad += f"        {shape};\n"
               scad += "    }\n"
-          else:  # Only shapes, no polygon
+          else:
               if len(shapes) == 1:
                   scad = f"    {shapes[0]};\n"
               else:
@@ -541,31 +516,26 @@ class StencilGenerator(pcbnew.ActionPlugin):
                   for shape in shapes:
                       scad += f"        {shape};\n"
                   scad += "    }\n"
-      
-      # Fallback if no Edge.Cuts found
+
       if not scad:
-          log("No Edge.Cuts shapes found, using board bounding box fallback with clearance")
           bbox = board.GetBoundingBox()
           w = self.mm(bbox.GetWidth()) + 2 * pcbClearence
           h = self.mm(bbox.GetHeight()) + 2 * pcbClearence
           scad = f"    square([{w}, {h}], center=true);\n"
-          log(f"Fallback size: {w} x {h} mm (with clearance)")
-      
+
       log("=== Edge.Cuts analysis complete ===")
-
       return scad
-
 
     def generate_pcb_outline(self, board):
         log = getattr(self, 'log_function', lambda msg: print(f"DEBUG: {msg}"))
         self.debug_all_layers(board)
-        pcb_rect = self.find_shape_on_layer(board, pcbnew.User_9)
+        pcb_rect = self.find_shape_on_layer(board, pcbnew.User_4)
         if pcb_rect:
-            log("Using User.9 rectangle for PCB outline")
+            log("Using User.4 rectangle for PCB outline")
             scad = f"    square([{self.mm(pcb_rect[2])}, {self.mm(pcb_rect[3])}], center=true);\n"
             return scad
         else:
-            log("No User.9 rectangle found, falling back to Edge.Cuts")
+            log("No User.4 rectangle found, falling back to Edge.Cuts")
             return self.generate_pcb_outline_from_edge_cuts(board)
 
 
@@ -771,94 +741,90 @@ class StencilGenerator(pcbnew.ActionPlugin):
 
 
     def generate_pads(self, board):
-        scad = ""
-        
-        # Try to get center from User.9 first
-        pcb_rect = self.find_shape_on_layer(board, pcbnew.User_9)
+      scad = ""
+      pcb_rect = self.find_shape_on_layer(board, pcbnew.User_4)
+      if pcb_rect:
+          center_x = pcb_rect[0] + pcb_rect[2]/2
+          center_y = pcb_rect[1] + pcb_rect[3]/2
+      else:
+          bbox = board.GetBoundingBox()
+          center_x = bbox.GetCenter().x
+          center_y = bbox.GetCenter().y
+
+      pads_info = []
+      for module in board.GetFootprints():
+          for pad in module.Pads():
+              if pad.GetAttribute() == pcbnew.PAD_ATTRIB_SMD:
+                  pad_layers = pad.GetLayerSet()
+                  is_front_copper = pad_layers.Contains(pcbnew.F_Cu)
+                  is_back_copper = pad_layers.Contains(pcbnew.B_Cu)
+                  should_include = False
+                  if front_copper_pads and is_front_copper:
+                      should_include = True
+                  if back_copper_pads and is_back_copper:
+                      should_include = True
+                  if should_include:
+                      pos = pad.GetPosition()
+                      size = pad.GetSize()
+                      angle = pad.GetOrientation().AsDegrees()
+                      x = self.mm(pos.x - center_x)
+                      y = self.mm(pos.y - center_y)
+                      if back_copper_pads:
+                          x = -x
+                      pads_info.append({
+                          'x': x,
+                          'y': y,
+                          'width': self.mm(size.x),
+                          'height': self.mm(size.y),
+                          'angle': angle,
+                          'pad': pad
+                      })
+
+      if not pads_info:
+          return "    // No SMD pads found matching layer criteria\n"
+
+      pad_groups = self.find_pad_groups(pads_info)
+      group_shrink_factors = {}
+      for group_indices in pad_groups:
+          shrink_factors = self.calculate_group_shrink_factor(group_indices, pads_info)
+          for idx in group_indices:
+              group_shrink_factors[idx] = shrink_factors
+
+      for i, pad_info in enumerate(pads_info):
+          shrink_factors = group_shrink_factors.get(i, {'width': 1.0, 'height': 1.0})
+          adjusted_width = pad_info['width'] * shrink_factors['width']
+          adjusted_height = pad_info['height'] * shrink_factors['height']
+          scad += f"    translate([{pad_info['x']}, {pad_info['y']}]) "
+          scad += f"rotate([0, 0, {pad_info['angle']}]) "
+          scad += f"square([{adjusted_width}, {adjusted_height}], center=true);\n"
+
+      return scad
+    
+    def generate_alignment_holes(self, board):
+        alignment_holes = self.find_circles_on_layer(board, pcbnew.User_2)
+        if not alignment_holes:
+            return "    // No alignment holes found on User.2 layer\n"
+
+        pcb_rect = self.find_shape_on_layer(board, pcbnew.User_4)
         if pcb_rect:
             center_x = pcb_rect[0] + pcb_rect[2]/2
             center_y = pcb_rect[1] + pcb_rect[3]/2
         else:
-            # Fallback to board bounding box center
             bbox = board.GetBoundingBox()
             center_x = bbox.GetCenter().x
             center_y = bbox.GetCenter().y
 
-        # Collect all SMD pads with their information, filtered by layer
-        pads_info = []
-        for module in board.GetFootprints():
-            for pad in module.Pads():
-                if pad.GetAttribute() == pcbnew.PAD_ATTRIB_SMD:
-                    # Check which copper layer(s) the pad is on
-                    pad_layers = pad.GetLayerSet()
-                    is_front_copper = pad_layers.Contains(pcbnew.F_Cu)
-                    is_back_copper = pad_layers.Contains(pcbnew.B_Cu)
-                    
-                    # Filter based on global configuration variables
-                    should_include = False
-                    if front_copper_pads and is_front_copper:
-                        should_include = True
-                    if back_copper_pads and is_back_copper:
-                        should_include = True
-                    
-                    # Only add pad if it matches the layer criteria
-                    if should_include:
-                        pos = pad.GetPosition()
-                        size = pad.GetSize()
-                        angle = pad.GetOrientation().AsDegrees()
-                        pads_info.append({
-                            'x': self.mm(pos.x - center_x),
-                            'y': self.mm(pos.y - center_y),
-                            'width': self.mm(size.x),
-                            'height': self.mm(size.y),
-                            'angle': angle,
-                            'pad': pad
-                        })
-
-        if not pads_info:
-            return "    // No SMD pads found matching layer criteria\n"
-
-        # Group pads that are close to each other
-        pad_groups = self.find_pad_groups(pads_info)
-        
-        # Calculate shrink factors for each group
-        group_shrink_factors = {}
-        for group_indices in pad_groups:
-            shrink_factors = self.calculate_group_shrink_factor(group_indices, pads_info)
-            for idx in group_indices:
-                group_shrink_factors[idx] = shrink_factors
-
-        # Generate pad cutouts with directional shrinking per group
-        for i, pad_info in enumerate(pads_info):
-            shrink_factors = group_shrink_factors.get(i, {'width': 1.0, 'height': 1.0})
-            
-            adjusted_width = pad_info['width'] * shrink_factors['width']
-            adjusted_height = pad_info['height'] * shrink_factors['height']
-            
-            scad += f"    translate([{pad_info['x']}, {pad_info['y']}]) "
-            scad += f"rotate([0, 0, {pad_info['angle']}]) "
-            scad += f"square([{adjusted_width}, {adjusted_height}], center=true);\n"
-        
-        return scad
-
-    def generate_alignment_holes(self, board):
-        alignment_holes = self.find_circles_on_layer(board, pcbnew.User_7)
-        if not alignment_holes:
-            return "    // No alignment holes found on User.7 layer\n"
-
-        pcb_rect = self.find_shape_on_layer(board, pcbnew.User_9)
-        if not pcb_rect:
-            return "    // No PCB outline found on User.9 layer\n"
-
-        center_x = pcb_rect[0] + pcb_rect[2]/2
-        center_y = pcb_rect[1] + pcb_rect[3]/2
-
         scad = ""
         for hole in alignment_holes:
+            # Bereken lokale coördinaten t.o.v. het midden
             x = self.mm(hole[0] - center_x)
             y = self.mm(hole[1] - center_y)
-            scad += f"    translate([{x}, {y}, -0.005]) "
-            scad += f"cylinder(h=frame_height + 0.01, d=alignment_pin_diameter, center=false);\n"
+            radius = self.mm(hole[2])  # Gebruik werkelijke radius
+            diameter = radius * 2
+            # Spiegel X-coördinaat voor Back (net zoals bij pads)
+            if back_copper_pads:
+                x = -x
+            scad += f"    translate([{x}, {y}, -0.005]) cylinder(h=frame_height + 0.01, d={diameter}, center=false);\n"
         return scad
 
     def find_shape_on_layer(self, board, layer):
@@ -878,7 +844,7 @@ class StencilGenerator(pcbnew.ActionPlugin):
                 drawing.GetShape() == pcbnew.SHAPE_T_CIRCLE and
                     drawing.GetLayer() == layer):
                 center = drawing.GetCenter()
-                circles.append((center.x, center.y))
+                circles.append((center.x, center.y, drawing.GetRadius()))
         return circles
 
     def mm(self, nm):
