@@ -11,7 +11,7 @@ import configparser
 
 
 # === Global configuration ===
-BUILD = "125"            # Build number
+BUILD = "127"            # Build number
 workDir = "stencil"      # Working folder name
 frontCopperPads = True # Generate front copper pads
 backCopperPads = False # Generate back copper pads
@@ -156,6 +156,23 @@ class StencilParametersDialog(wx.Dialog):
             return None
 
 class StencilGenerator(pcbnew.ActionPlugin):
+    def get_debug_log_function(self):
+        """Get unified debug logging function"""
+        try:
+            board = pcbnew.GetBoard()
+            projectFile = board.GetFileName()
+            projectDir = os.path.dirname(projectFile)
+            output_dir = os.path.join(projectDir, workDir)
+            log_file = os.path.join(output_dir, "kicad_stencilgen_debug.log")
+            
+            def debug_log(msg):
+                with open(log_file, "a", encoding="utf-8") as f:
+                    f.write(f"{datetime.datetime.now().strftime('%H:%M:%S')} - {msg}\n")
+            
+            return debug_log
+        except:
+            return lambda msg: print(f"DEBUG: {msg}")
+    
     def defaults(self):
         self.name = "3dp Stencil Generator"
         self.category = "Modify PCB"
@@ -163,7 +180,7 @@ class StencilGenerator(pcbnew.ActionPlugin):
         self.show_toolbar_button = True
         self.icon_file_name = os.path.join(
             os.path.dirname(__file__), "./icon.png")
-        
+
     def showParametersDialog(self):
         app = wx.App.Get()
         if not app:
@@ -703,102 +720,140 @@ class StencilGenerator(pcbnew.ActionPlugin):
         
         return close_pads
 
+        
     def optimizeNarrowPads(self, padsInfo, groupShrinkFactors):
-        """Optimize narrow pads to maximize their width while respecting constraints"""
+        """Optimize narrow pads to maximize their dimensions while respecting constraints"""
         import math
         
+        debug_log = self.get_debug_log_function()
+        
         optimizedFactors = groupShrinkFactors.copy()
+        narrowPadsFound = 0
+        actuallyOptimized = 0
+        
+        # Only log header if we find narrow pads
+        headerLogged = False
         
         for i, pad_info in enumerate(padsInfo):
             # Check if this pad has any dimension below threshold
-            if min(pad_info['width'], pad_info['height']) < narrowPadThreshold:
-                # Find available space around this pad
-                availableSpaceX = self.calculateAvailableSpace(pad_info, padsInfo, i, 'x')
-                availableSpaceY = self.calculateAvailableSpace(pad_info, padsInfo, i, 'y')
+            minDimension = min(pad_info['width'], pad_info['height'])
+            isNarrow = minDimension < narrowPadThreshold
+            
+            if isNarrow:
+                narrowPadsFound += 1
                 
-                # Get current shrink factors
+                # Start with no shrinking (factor 1.0)
                 currentFactors = optimizedFactors.get(i, {'width': 1.0, 'height': 1.0})
-                
-                # Calculate current adjusted dimensions
-                currentWidth = pad_info['width'] * currentFactors['width']
-                currentHeight = pad_info['height'] * currentFactors['height']
+                originalFactors = currentFactors.copy()
+                wasOptimized = False
                 
                 # Try to optimize width if it's narrow
                 if pad_info['width'] < narrowPadThreshold:
-                    # Calculate maximum possible width
-                    maxPossibleWidth = availableSpaceX
-                    if maxPossibleWidth > currentWidth:
-                        newWidthFactor = min(1.0, maxPossibleWidth / pad_info['width'])
-                        # Ensure we don't go below minimum pad size
-                        if pad_info['width'] * newWidthFactor >= minPadSize:
-                            optimizedFactors[i] = {
-                                'width': newWidthFactor,
-                                'height': currentFactors['height']
-                            }
+                    maxPossibleWidth = self.calculateMaxPadDimension(pad_info, padsInfo, i, 'width')
+                    if maxPossibleWidth > pad_info['width']:
+                        newWidthFactor = maxPossibleWidth / pad_info['width']
+                        currentFactors['width'] = newWidthFactor
+                        wasOptimized = True
                 
                 # Try to optimize height if it's narrow
                 if pad_info['height'] < narrowPadThreshold:
-                    # Calculate maximum possible height
-                    maxPossibleHeight = availableSpaceY
-                    if maxPossibleHeight > currentHeight:
-                        newHeightFactor = min(1.0, maxPossibleHeight / pad_info['height'])
-                        # Ensure we don't go below minimum pad size
-                        if pad_info['height'] * newHeightFactor >= minPadSize:
-                            currentFactors = optimizedFactors.get(i, {'width': 1.0, 'height': 1.0})
-                            optimizedFactors[i] = {
-                                'width': currentFactors['width'],
-                                'height': newHeightFactor
-                            }
+                    maxPossibleHeight = self.calculateMaxPadDimension(pad_info, padsInfo, i, 'height')
+                    if maxPossibleHeight > pad_info['height']:
+                        newHeightFactor = maxPossibleHeight / pad_info['height']
+                        currentFactors['height'] = newHeightFactor
+                        wasOptimized = True
+                
+                # Only log if pad was actually optimized
+                if wasOptimized:
+                    if not headerLogged:
+                        debug_log("=== NARROW PAD OPTIMIZATION ===")
+                        debug_log(f"narrowPadThreshold: {narrowPadThreshold} mm")
+                        debug_log(f"minGabBetweenPads: {minGabBetweenPads} mm")
+                        headerLogged = True
+                    
+                    actuallyOptimized += 1
+                    optimizedFactors[i] = currentFactors
+                    
+                    # Calculate final dimensions
+                    finalWidth = pad_info['width'] * currentFactors['width']
+                    finalHeight = pad_info['height'] * currentFactors['height']
+                    
+                    debug_log(f"Pad {i}: pos=({pad_info['x']:.3f}, {pad_info['y']:.3f})")
+                    debug_log(f"  OPTIMIZED: {pad_info['width']:.3f}x{pad_info['height']:.3f} -> {finalWidth:.3f}x{finalHeight:.3f}")
+                    debug_log(f"  Factors: width={currentFactors['width']:.3f}, height={currentFactors['height']:.3f}")
+        
+        if headerLogged:
+            debug_log(f"=== OPTIMIZATION SUMMARY ===")
+            debug_log(f"Narrow pads found: {narrowPadsFound}, Actually optimized: {actuallyOptimized}")
+            debug_log("")  # Empty line for readability
         
         return optimizedFactors
 
-    def calculateAvailableSpace(self, targetPad, allPads, targetIndex, direction):
-        """Calculate available space around a pad in given direction"""
+
+        
+    def calculateMaxPadDimension(self, targetPad, allPads, targetIndex, dimension):
+        """Calculate maximum possible dimension for a pad without violating minGabBetweenPads"""
         import math
         
-        minDistance = float('inf')
+        debug_log = self.get_debug_log_function()
+        
+        # Start with a reasonable maximum (3x original size)
+        maxDimension = targetPad[dimension] * 3
+        constrainingPads = 0
         
         for i, pad in enumerate(allPads):
             if i == targetIndex:
                 continue
                 
-            if direction == 'x':
-                # Check horizontal distance
-                dx = abs(pad['x'] - targetPad['x'])
-                dy = abs(pad['y'] - targetPad['y'])
-                
-                # Only consider pads that could interfere horizontally
-                # (overlapping in Y direction or close enough)
-                padOverlapY = (pad['height'] + targetPad['height']) / 2
-                if dy < padOverlapY + minGabBetweenPads:
-                    # Calculate edge-to-edge distance
-                    padDistance = dx - (pad['width'] + targetPad['width']) / 2
-                    if padDistance > minGabBetweenPads:
-                        # Available space is the distance minus required gap
-                        availableSpace = padDistance - minGabBetweenPads
-                        minDistance = min(minDistance, availableSpace)
+            dx = abs(pad['x'] - targetPad['x'])
+            dy = abs(pad['y'] - targetPad['y'])
+            
+            if dimension == 'width':
+                # Check if pads could interfere horizontally (overlap in Y direction)
+                yOverlapThreshold = (pad['height'] + targetPad['height']) / 2 + minGabBetweenPads
+                if dy < yOverlapThreshold:
+                    constrainingPads += 1
+                    
+                    # Calculate current edge-to-edge gap in X direction
+                    currentGap = dx - (pad['width'] + targetPad['width']) / 2
+                    
+                    # Available expansion = current gap - required minimum gap
+                    availableExpansion = currentGap - minGabBetweenPads
+                    
+                    # Maximum width = current width + available expansion
+                    maxAllowedWidth = targetPad['width'] + availableExpansion
+                    
+                    if maxAllowedWidth > 0:
+                        maxDimension = min(maxDimension, maxAllowedWidth)
+                    else:
+                        # No expansion possible, keep original size
+                        maxDimension = min(maxDimension, targetPad['width'])
                         
-            else:  # direction == 'y'
-                # Check vertical distance
-                dx = abs(pad['x'] - targetPad['x'])
-                dy = abs(pad['y'] - targetPad['y'])
-                
-                # Only consider pads that could interfere vertically
-                # (overlapping in X direction or close enough)
-                padOverlapX = (pad['width'] + targetPad['width']) / 2
-                if dx < padOverlapX + minGabBetweenPads:
-                    # Calculate edge-to-edge distance
-                    padDistance = dy - (pad['height'] + targetPad['height']) / 2
-                    if padDistance > minGabBetweenPads:
-                        # Available space is the distance minus required gap
-                        availableSpace = padDistance - minGabBetweenPads
-                        minDistance = min(minDistance, availableSpace)
+            else:  # dimension == 'height'
+                # Check if pads could interfere vertically (overlap in X direction)
+                xOverlapThreshold = (pad['width'] + targetPad['width']) / 2 + minGabBetweenPads
+                if dx < xOverlapThreshold:
+                    constrainingPads += 1
+                    
+                    # Calculate current edge-to-edge gap in Y direction
+                    currentGap = dy - (pad['height'] + targetPad['height']) / 2
+                    
+                    # Available expansion = current gap - required minimum gap
+                    availableExpansion = currentGap - minGabBetweenPads
+                    
+                    # Maximum height = current height + available expansion
+                    maxAllowedHeight = targetPad['height'] + availableExpansion
+                    
+                    if maxAllowedHeight > 0:
+                        maxDimension = min(maxDimension, maxAllowedHeight)
+                    else:
+                        # No expansion possible, keep original size
+                        maxDimension = min(maxDimension, targetPad['height'])
         
-        # Return available space, or a reasonable maximum if no constraints found
-        if minDistance == float('inf'):
-            return narrowPadThreshold * 3  # Plenty of space available
-        else:
-            return max(0, minDistance)
+        # Ensure we don't go below minimum pad size
+        finalDimension = max(maxDimension, minPadSize)
+        
+        return finalDimension
 
 
     def projectPadDimension(self, pad_info, direction_x, direction_y):
@@ -943,68 +998,100 @@ class StencilGenerator(pcbnew.ActionPlugin):
             'height': max(minPadSize, minHeightShrink)
         }
 
-
+        
     def generatePads(self, board):
-      scad = ""
-      pcbRect = self.findShapeOnLayer(board, pcbnew.User_4)
-      if pcbRect:
-          centerX = pcbRect[0] + pcbRect[2]/2
-          centerY = pcbRect[1] + pcbRect[3]/2
-      else:
-          bbox = board.GetBoundingBox()
-          centerX = bbox.GetCenter().x
-          centerY = bbox.GetCenter().y
+        """Generate SCAD code for all SMD pads with narrow pad optimization"""
+        scad = ""  
+        
+        # Determine PCB center coordinates
+        pcbRect = self.findShapeOnLayer(board, pcbnew.User_4)
+        if pcbRect:
+            centerX = pcbRect[0] + pcbRect[2]/2
+            centerY = pcbRect[1] + pcbRect[3]/2
+        else:
+            bbox = board.GetBoundingBox()
+            centerX = bbox.GetCenter().x
+            centerY = bbox.GetCenter().y
 
-      padsInfo = []
-      for module in board.GetFootprints():
-          for pad in module.Pads():
-              if pad.GetAttribute() == pcbnew.PAD_ATTRIB_SMD:
-                  padLayers = pad.GetLayerSet()
-                  isFrontCopper = padLayers.Contains(pcbnew.F_Cu)
-                  isBackCopper = padLayers.Contains(pcbnew.B_Cu)
-                  shouldInclude = False
-                  if frontCopperPads and isFrontCopper:
-                      shouldInclude = True
-                  if backCopperPads and isBackCopper:
-                      shouldInclude = True
-                  if shouldInclude:
-                      pos = pad.GetPosition()
-                      size = pad.GetSize()
-                      angle = pad.GetOrientation().AsDegrees()
-                      x = self.mm(pos.x - centerX)
-                      y = self.mm(pos.y - centerY)
-                      if backCopperPads:
-                          x = -x
-                      padsInfo.append({
-                          'x': x,
-                          'y': y,
-                          'width': self.mm(size.x),
-                          'height': self.mm(size.y),
-                          'angle': angle,
-                          'pad': pad
-                      })
+        # Collect all SMD pad information
+        padsInfo = []
+        for module in board.GetFootprints():
+            for pad in module.Pads():
+                if pad.GetAttribute() == pcbnew.PAD_ATTRIB_SMD:
+                    padLayers = pad.GetLayerSet()
+                    isFrontCopper = padLayers.Contains(pcbnew.F_Cu)
+                    isBackCopper = padLayers.Contains(pcbnew.B_Cu)
+                    shouldInclude = False
+                    
+                    # Check if pad should be included based on selected copper side
+                    if frontCopperPads and isFrontCopper:
+                        shouldInclude = True
+                    if backCopperPads and isBackCopper:
+                        shouldInclude = True
+                        
+                    if shouldInclude:
+                        pos = pad.GetPosition()
+                        size = pad.GetSize()
+                        angle = pad.GetOrientation().AsDegrees()
+                        x = self.mm(pos.x - centerX)
+                        y = self.mm(pos.y - centerY)
+                        
+                        # Mirror X coordinate for back side
+                        if backCopperPads:
+                            x = -x
+                            
+                        padsInfo.append({
+                            'x': x,
+                            'y': y,
+                            'width': self.mm(size.x),
+                            'height': self.mm(size.y),
+                            'angle': angle,
+                            'pad': pad
+                        })
 
-      if not padsInfo:
-          return "    // No SMD pads found matching layer criteria\n"
+        if not padsInfo:
+            return "    // No SMD pads found matching layer criteria\n"
 
-      pad_groups = self.findPadGroups(padsInfo)
-      groupShrinkFactors = {}
-      for groupIndices in pad_groups:
-          shrinkFactors = self.calculateGroupShrinkFactor(groupIndices, padsInfo)
-          for idx in groupIndices:
-              groupShrinkFactors[idx] = shrinkFactors
+        # STEP 1: Optimize narrow pads first (expand them to use available space)
+        # This must be done BEFORE group shrinking to prevent conflicts
+        groupShrinkFactors = self.optimizeNarrowPads(padsInfo, {})
+        
+        # STEP 2: Apply group shrinking for closely packed pads
+        # Only apply to pads that weren't optimized, or if shrinking is more restrictive
+        pad_groups = self.findPadGroups(padsInfo)
+        for groupIndices in pad_groups:
+            shrinkFactors = self.calculateGroupShrinkFactor(groupIndices, padsInfo)
+            for idx in groupIndices:
+                # Apply shrinking only if pad hasn't been optimized yet
+                if idx not in groupShrinkFactors:
+                    groupShrinkFactors[idx] = shrinkFactors
+                else:
+                    # For optimized pads: only apply group shrinking if it's MORE restrictive
+                    # This preserves narrow pad optimization while still respecting minimum gaps
+                    existingFactors = groupShrinkFactors[idx]
+                    
+                    # Only override optimization if group shrinking is more restrictive in BOTH dimensions
+                    if (shrinkFactors['width'] < existingFactors['width'] and 
+                        shrinkFactors['height'] < existingFactors['height']):
+                        # Group shrinking is more restrictive, use it
+                        groupShrinkFactors[idx] = shrinkFactors
+                    # else: keep the existing optimized factors (they provide better pad visibility)
 
-      groupShrinkFactors = self.optimizeNarrowPads(padsInfo, groupShrinkFactors)
+        # STEP 3: Generate SCAD code for all pads using calculated factors
+        for i, pad_info in enumerate(padsInfo):
+            # Get shrink/expand factors for this pad (default to no change if not calculated)
+            shrinkFactors = groupShrinkFactors.get(i, {'width': 1.0, 'height': 1.0})
+            
+            # Apply factors to original pad dimensions
+            adjusted_width = pad_info['width'] * shrinkFactors['width']
+            adjusted_height = pad_info['height'] * shrinkFactors['height']
+            
+            # Generate SCAD square command for this pad
+            scad += f"    translate([{pad_info['x']}, {pad_info['y']}]) "
+            scad += f"rotate([0, 0, {pad_info['angle']}]) "
+            scad += f"square([{adjusted_width}, {adjusted_height}], center=true);\n"
 
-      for i, pad_info in enumerate(padsInfo):
-          shrinkFactors = groupShrinkFactors.get(i, {'width': 1.0, 'height': 1.0})
-          adjusted_width = pad_info['width'] * shrinkFactors['width']
-          adjusted_height = pad_info['height'] * shrinkFactors['height']
-          scad += f"    translate([{pad_info['x']}, {pad_info['y']}]) "
-          scad += f"rotate([0, 0, {pad_info['angle']}]) "
-          scad += f"square([{adjusted_width}, {adjusted_height}], center=true);\n"
-
-      return scad
+        return scad
     
     def generateAlignmentHoles(self, board):
         alignmentHoles = self.findCirclesOnLayer(board, pcbnew.User_2)
@@ -1056,29 +1143,28 @@ class StencilGenerator(pcbnew.ActionPlugin):
     def mm(self, nm):
         return nm / 1e6
 
+
     def debugAllLayers(self, board):
         """Debug function to list all layers with drawings"""
         try:
-            projectFile = board.GetFileName()
-            projectDir = os.path.dirname(projectFile)
-            output_dir = os.path.join(projectDir, workDir)
-            log_file = os.path.join(output_dir, "all_layers_debug.log")
+            debug_log = self.get_debug_log_function()
             
-            with open(log_file, "w", encoding="utf-8") as f:
-                f.write(f"=== All Layers Analysis ===\n")
+            debug_log("=== ALL LAYERS ANALYSIS ===")
+            
+            layer_counts = {}
+            for drawing in board.GetDrawings():
+                layer = drawing.GetLayer()
+                if layer not in layer_counts:
+                    layer_counts[layer] = 0
+                layer_counts[layer] += 1
+            
+            debug_log(f"Total drawings: {sum(layer_counts.values())}")
+            for layer, count in sorted(layer_counts.items()):
+                debug_log(f"Layer {layer}: {count} drawings")
                 
-                layer_counts = {}
-                for drawing in board.GetDrawings():
-                    layer = drawing.GetLayer()
-                    if layer not in layer_counts:
-                        layer_counts[layer] = 0
-                    layer_counts[layer] += 1
-                
-                f.write(f"Total drawings: {sum(layer_counts.values())}\n")
-                for layer, count in sorted(layer_counts.items()):
-                    f.write(f"Layer {layer}: {count} drawings\n")
-                    
-                f.write(f"\nEdge_Cuts constant value: {pcbnew.Edge_Cuts}\n")
+            debug_log(f"Edge_Cuts constant value: {pcbnew.Edge_Cuts}")
+            debug_log("")  # Empty line for readability
+            
         except Exception as e:
             print(f"Debug error: {e}")
 
