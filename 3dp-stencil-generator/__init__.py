@@ -59,6 +59,10 @@ def loadConfigFromIni(projectDir):
                 value = float(settings['narrowPadThreshold'])
                 if 0.1 <= value <= 5.0:  # Reasonable range
                     narrowPadThreshold = value
+        
+        # make sure minPadSize is not smaller than narrowPadThreshold
+        if minPadSize < narrowPadThreshold:
+            minPadSize = narrowPadThreshold
                     
     except Exception as e:
         # If any error occurs, just use default values
@@ -141,6 +145,11 @@ class StencilParametersDialog(wx.Dialog):
             padSize = float(self.padSize_ctrl.GetValue())
             clearance = float(self.clearance_ctrl.GetValue())
             narrowThreshold = float(self.narrowThreshold_ctrl.GetValue())
+            
+            # NIEUWE VALIDATIE: Zorg dat minPadSize nooit kleiner is dan narrowPadThreshold
+            if padSize < narrowThreshold:
+                wx.MessageBox(f"Minimum pad size ({padSize}) cannot be smaller than narrow pad threshold ({narrowThreshold})!", "Validation Error")
+                return None
             
             return {
                 'copperSelection': copperSelection,
@@ -226,7 +235,7 @@ class StencilGenerator(pcbnew.ActionPlugin):
 
             # Load configuration from INI file
             loadConfigFromIni(projectDir)
-            log(f"Config loaded - maskWidth: {minGabBetweenPads}, padSize: {minPadSize}, clearance: {pcbClearence}")
+            log(f"Config loaded - maskWidth: {minGabBetweenPads}, padSize: {minPadSize}, narrowPadThreshold: {narrowPadThreshold}, clearance: {pcbClearence}")
 
             # Show parameter dialog
             log("Showing parameters dialog")
@@ -730,6 +739,7 @@ class StencilGenerator(pcbnew.ActionPlugin):
         optimizedFactors = groupShrinkFactors.copy()
         narrowPadsFound = 0
         actuallyOptimized = 0
+        cappedAtMinPadSize = 0
         
         # Only log header if we find narrow pads
         headerLogged = False
@@ -746,6 +756,7 @@ class StencilGenerator(pcbnew.ActionPlugin):
                 currentFactors = optimizedFactors.get(i, {'width': 1.0, 'height': 1.0})
                 originalFactors = currentFactors.copy()
                 wasOptimized = False
+                wasCapped = False
                 
                 # Try to optimize width if it's narrow
                 if pad_info['width'] < narrowPadThreshold:
@@ -754,6 +765,10 @@ class StencilGenerator(pcbnew.ActionPlugin):
                         newWidthFactor = maxPossibleWidth / pad_info['width']
                         currentFactors['width'] = newWidthFactor
                         wasOptimized = True
+                        
+                        # Check if we were capped at minPadSize
+                        if maxPossibleWidth >= minPadSize:
+                            wasCapped = True
                 
                 # Try to optimize height if it's narrow
                 if pad_info['height'] < narrowPadThreshold:
@@ -762,16 +777,24 @@ class StencilGenerator(pcbnew.ActionPlugin):
                         newHeightFactor = maxPossibleHeight / pad_info['height']
                         currentFactors['height'] = newHeightFactor
                         wasOptimized = True
+                        
+                        # Check if we were capped at minPadSize
+                        if maxPossibleHeight >= minPadSize:
+                            wasCapped = True
                 
                 # Only log if pad was actually optimized
                 if wasOptimized:
                     if not headerLogged:
                         debug_log("=== NARROW PAD OPTIMIZATION ===")
                         debug_log(f"narrowPadThreshold: {narrowPadThreshold} mm")
+                        debug_log(f"minPadSize (max limit): {minPadSize} mm")
                         debug_log(f"minGabBetweenPads: {minGabBetweenPads} mm")
                         headerLogged = True
                     
                     actuallyOptimized += 1
+                    if wasCapped:
+                        cappedAtMinPadSize += 1
+                        
                     optimizedFactors[i] = currentFactors
                     
                     # Calculate final dimensions
@@ -781,77 +804,186 @@ class StencilGenerator(pcbnew.ActionPlugin):
                     debug_log(f"Pad {i}: pos=({pad_info['x']:.3f}, {pad_info['y']:.3f})")
                     debug_log(f"  OPTIMIZED: {pad_info['width']:.3f}x{pad_info['height']:.3f} -> {finalWidth:.3f}x{finalHeight:.3f}")
                     debug_log(f"  Factors: width={currentFactors['width']:.3f}, height={currentFactors['height']:.3f}")
+                    if wasCapped:
+                        debug_log(f"  NOTE: Capped at minPadSize limit ({minPadSize} mm)")
         
         if headerLogged:
             debug_log(f"=== OPTIMIZATION SUMMARY ===")
             debug_log(f"Narrow pads found: {narrowPadsFound}, Actually optimized: {actuallyOptimized}")
+            if cappedAtMinPadSize > 0:
+                debug_log(f"Pads capped at minPadSize limit: {cappedAtMinPadSize}")
             debug_log("")  # Empty line for readability
         
         return optimizedFactors
 
-
         
     def calculateMaxPadDimension(self, targetPad, allPads, targetIndex, dimension):
-        """Calculate maximum possible dimension for a pad without violating minGabBetweenPads"""
+        """
+        Calculate maximum possible dimension for a narrow pad while respecting minGabBetweenPads.
+        
+        This function implements intelligent directional expansion:
+        - If space available in both directions: expand symmetrically up to minPadSize
+        - If space only in one direction: expand toward that direction up to minPadSize  
+        - If no space in either direction: keep original size
+        - Always respect minGabBetweenPads constraints with neighboring pads
+        
+        Args:
+            targetPad: Dictionary with pad info (x, y, width, height, angle)
+            allPads: List of all pad dictionaries
+            targetIndex: Index of target pad in allPads list
+            dimension: 'width' or 'height' - which dimension to optimize
+            
+        Returns:
+            float: Maximum safe dimension size (capped at minPadSize)
+        """
         import math
         
         debug_log = self.get_debug_log_function()
         
-        # Start with a reasonable maximum (3x original size)
-        maxDimension = targetPad[dimension] * 3
-        constrainingPads = 0
+        # Get original dimension value
+        originalDimension = targetPad[dimension]
+        
+        # Target size is minPadSize for narrow pad optimization
+        targetSize = minPadSize
+        
+        # If already at or above target, no optimization needed
+        if originalDimension >= targetSize:
+            return originalDimension
+        
+        # Calculate how much expansion is needed
+        totalExpansionNeeded = targetSize - originalDimension
+        
+        # Find all constraining pads and calculate available space in each direction
+        positiveConstraints = []  # Pads that constrain positive direction expansion
+        negativeConstraints = []  # Pads that constrain negative direction expansion
         
         for i, pad in enumerate(allPads):
             if i == targetIndex:
                 continue
                 
-            dx = abs(pad['x'] - targetPad['x'])
-            dy = abs(pad['y'] - targetPad['y'])
+            # Calculate relative position
+            dx = pad['x'] - targetPad['x']
+            dy = pad['y'] - targetPad['y']
             
             if dimension == 'width':
-                # Check if pads could interfere horizontally (overlap in Y direction)
-                yOverlapThreshold = (pad['height'] + targetPad['height']) / 2 + minGabBetweenPads
-                if dy < yOverlapThreshold:
-                    constrainingPads += 1
+                # For width optimization, check horizontal constraints
+                # Only consider pads that overlap vertically (could interfere horizontally)
+                verticalOverlapThreshold = (pad['height'] + targetPad['height']) / 2 + minGabBetweenPads
+                
+                if abs(dy) < verticalOverlapThreshold:
+                    # This pad could constrain horizontal expansion
                     
                     # Calculate current edge-to-edge gap in X direction
-                    currentGap = dx - (pad['width'] + targetPad['width']) / 2
+                    currentGapX = abs(dx) - (pad['width'] + targetPad['width']) / 2
                     
-                    # Available expansion = current gap - required minimum gap
-                    availableExpansion = currentGap - minGabBetweenPads
+                    # Calculate maximum expansion possible before violating minGabBetweenPads
+                    maxExpansionTowardThisPad = max(0, currentGapX - minGabBetweenPads)
                     
-                    # Maximum width = current width + available expansion
-                    maxAllowedWidth = targetPad['width'] + availableExpansion
-                    
-                    if maxAllowedWidth > 0:
-                        maxDimension = min(maxDimension, maxAllowedWidth)
+                    # Determine which direction this pad constrains
+                    if dx > 0:
+                        # Constraining pad is to the RIGHT (positive X direction)
+                        positiveConstraints.append({
+                            'padIndex': i,
+                            'distance': dx,
+                            'maxExpansion': maxExpansionTowardThisPad
+                        })
                     else:
-                        # No expansion possible, keep original size
-                        maxDimension = min(maxDimension, targetPad['width'])
-                        
+                        # Constraining pad is to the LEFT (negative X direction)  
+                        negativeConstraints.append({
+                            'padIndex': i,
+                            'distance': abs(dx),
+                            'maxExpansion': maxExpansionTowardThisPad
+                        })
+                            
             else:  # dimension == 'height'
-                # Check if pads could interfere vertically (overlap in X direction)
-                xOverlapThreshold = (pad['width'] + targetPad['width']) / 2 + minGabBetweenPads
-                if dx < xOverlapThreshold:
-                    constrainingPads += 1
+                # For height optimization, check vertical constraints
+                # Only consider pads that overlap horizontally (could interfere vertically)
+                horizontalOverlapThreshold = (pad['width'] + targetPad['width']) / 2 + minGabBetweenPads
+                
+                if abs(dx) < horizontalOverlapThreshold:
+                    # This pad could constrain vertical expansion
                     
                     # Calculate current edge-to-edge gap in Y direction
-                    currentGap = dy - (pad['height'] + targetPad['height']) / 2
+                    currentGapY = abs(dy) - (pad['height'] + targetPad['height']) / 2
                     
-                    # Available expansion = current gap - required minimum gap
-                    availableExpansion = currentGap - minGabBetweenPads
+                    # Calculate maximum expansion possible before violating minGabBetweenPads
+                    maxExpansionTowardThisPad = max(0, currentGapY - minGabBetweenPads)
                     
-                    # Maximum height = current height + available expansion
-                    maxAllowedHeight = targetPad['height'] + availableExpansion
-                    
-                    if maxAllowedHeight > 0:
-                        maxDimension = min(maxDimension, maxAllowedHeight)
+                    # Determine which direction this pad constrains
+                    if dy > 0:
+                        # Constraining pad is ABOVE (positive Y direction)
+                        positiveConstraints.append({
+                            'padIndex': i,
+                            'distance': dy,
+                            'maxExpansion': maxExpansionTowardThisPad
+                        })
                     else:
-                        # No expansion possible, keep original size
-                        maxDimension = min(maxDimension, targetPad['height'])
+                        # Constraining pad is BELOW (negative Y direction)
+                        negativeConstraints.append({
+                            'padIndex': i,
+                            'distance': abs(dy),
+                            'maxExpansion': maxExpansionTowardThisPad
+                        })
         
-        # Ensure we don't go below minimum pad size
-        finalDimension = max(maxDimension, minPadSize)
+        # Calculate maximum expansion possible in each direction
+        # For each direction, the limiting factor is the most restrictive constraint
+        maxPositiveExpansion = min([c['maxExpansion'] for c in positiveConstraints]) if positiveConstraints else totalExpansionNeeded
+        maxNegativeExpansion = min([c['maxExpansion'] for c in negativeConstraints]) if negativeConstraints else totalExpansionNeeded
+        
+        # Determine optimal expansion strategy
+        finalDimension = originalDimension
+        expansionStrategy = "none"
+        
+        # Strategy 1: Try symmetrical expansion (expand equally in both directions)
+        if maxPositiveExpansion > 0 and maxNegativeExpansion > 0:
+            # Both directions have some space
+            symmetricalExpansion = min(maxPositiveExpansion, maxNegativeExpansion) * 2  # Total expansion from both sides
+            
+            if symmetricalExpansion >= totalExpansionNeeded:
+                # Symmetrical expansion can achieve target size
+                finalDimension = targetSize
+                expansionStrategy = "symmetrical"
+            else:
+                # Partial symmetrical expansion + directional expansion
+                remainingExpansion = totalExpansionNeeded - symmetricalExpansion
+                
+                if maxPositiveExpansion > maxNegativeExpansion:
+                    # More space in positive direction
+                    additionalExpansion = min(remainingExpansion, maxPositiveExpansion - min(maxPositiveExpansion, maxNegativeExpansion))
+                    finalDimension = originalDimension + symmetricalExpansion + additionalExpansion
+                    expansionStrategy = "symmetrical + positive"
+                else:
+                    # More space in negative direction  
+                    additionalExpansion = min(remainingExpansion, maxNegativeExpansion - min(maxPositiveExpansion, maxNegativeExpansion))
+                    finalDimension = originalDimension + symmetricalExpansion + additionalExpansion
+                    expansionStrategy = "symmetrical + negative"
+        
+        # Strategy 2: Directional expansion only
+        elif maxPositiveExpansion > 0:
+            # Only positive direction has space
+            expansion = min(totalExpansionNeeded, maxPositiveExpansion)
+            finalDimension = originalDimension + expansion
+            expansionStrategy = "positive only"
+            
+        elif maxNegativeExpansion > 0:
+            # Only negative direction has space
+            expansion = min(totalExpansionNeeded, maxNegativeExpansion)
+            finalDimension = originalDimension + expansion
+            expansionStrategy = "negative only"
+        
+        # Apply absolute maximum limit (never exceed minPadSize)
+        finalDimension = min(finalDimension, minPadSize)
+        
+        # Debug logging for troubleshooting
+        if finalDimension > originalDimension:
+            debug_log(f"  {dimension} expansion analysis:")
+            debug_log(f"    Original: {originalDimension:.3f}mm -> Final: {finalDimension:.3f}mm")
+            debug_log(f"    Target size: {targetSize:.3f}mm, Expansion needed: {totalExpansionNeeded:.3f}mm")
+            debug_log(f"    Positive constraints: {len(positiveConstraints)}, max expansion: {maxPositiveExpansion:.3f}mm")
+            debug_log(f"    Negative constraints: {len(negativeConstraints)}, max expansion: {maxNegativeExpansion:.3f}mm")
+            debug_log(f"    Strategy: {expansionStrategy}")
+            if finalDimension >= minPadSize:
+                debug_log(f"    NOTE: Achieved target size ({minPadSize}mm)")
         
         return finalDimension
 

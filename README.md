@@ -45,9 +45,12 @@ pcbClearance = 0.15      # PCB clearance (mm) - moves outline outward from Edge.
 
   - A parameter dialog will appear where you can configure settings interactively
 
+<figure style="text-align: center; margin: 0 auto;">
     <img src="./images/dialog.png" alt="Dialoog" width="400">
+  <figcaption>Dialog to set parameters</figcaption>
+</figure>
 
-  - Changes in the Dialog will be saved and used until changed again.
+  - Changes in the Dialog will be saved and used on a "per project" basis.
 
    - Alternatively, you can modify the default values in the `__init__.py` file
 5. The plugin will create a working directory ("/stencil" defined in the `__init__.py` program) in the same directory as your PCB file and then generate an OpenSCAD file in that directory.
