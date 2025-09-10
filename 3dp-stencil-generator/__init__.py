@@ -11,20 +11,21 @@ import configparser
 
 
 # === Global configuration ===
-BUILD = "124"            # Build number
+BUILD = "125"            # Build number
 workDir = "stencil"      # Working folder name
 frontCopperPads = True # Generate front copper pads
 backCopperPads = False # Generate back copper pads
 copperSelection = 0     # 0 = front, 1 = back
 minGabBetweenPads = 0.20    # Minimum mask width (mm) between pads
 minPadSize = 0.40      # Minimum pad size (mm) after shrinking
+narrowPadThreshold = 1.0  # Threshold for narrow pad optimization (mm)
 pcbClearence = 0.15      # PCB clearance (mm) - moves outline outward from Edge.Cuts
 
 import wx
 
 def loadConfigFromIni(projectDir):
     """Load configuration from 3dpStencil.ini file"""
-    global minGabBetweenPads, minPadSize, pcbClearence
+    global minGabBetweenPads, minPadSize, pcbClearence, narrowPadThreshold
     
     config_file = os.path.join(projectDir, workDir, "3dpStencil.ini")
     
@@ -53,12 +54,18 @@ def loadConfigFromIni(projectDir):
                 value = float(settings['pcbCearance'])
                 if 0.0 <= value <= 2.0:  # Reasonable range
                     pcbClearence = value
+            
+            if 'narrowPadThreshold' in settings:
+                value = float(settings['narrowPadThreshold'])
+                if 0.1 <= value <= 5.0:  # Reasonable range
+                    narrowPadThreshold = value
                     
     except Exception as e:
         # If any error occurs, just use default values
         print(f"Warning: Could not load config from {config_file}: {e}")
 
-def saveConfigToIni(projectDir, maskWidth, padSize, clearance):
+
+def saveConfigToIni(projectDir, maskWidth, padSize, clearance, narrowThreshold):
     """Save configuration to 3dpStencil.ini file"""
     config_dir = os.path.join(projectDir, workDir)
     config_file = os.path.join(config_dir, "3dpStencil.ini")
@@ -72,7 +79,8 @@ def saveConfigToIni(projectDir, maskWidth, padSize, clearance):
         config['StencilSettings'] = {
             'minGabBetweenPads': str(maskWidth),
             'minPadSize': str(padSize),
-            'pcbCearance': str(clearance)
+            'pcbCearance': str(clearance),
+            'narrowPadThreshold': str(narrowThreshold)
         }
         
         # Write config file
@@ -82,6 +90,7 @@ def saveConfigToIni(projectDir, maskWidth, padSize, clearance):
     except Exception as e:
         # Don't crash if we can't save config
         print(f"Warning: Could not save config to {config_file}: {e}")
+
 
 class StencilParametersDialog(wx.Dialog):
     def __init__(self, parent):
@@ -107,6 +116,11 @@ class StencilParametersDialog(wx.Dialog):
         self.clearance_ctrl = wx.TextCtrl(self, value=str(pcbClearence))
         sizer.Add(self.clearance_ctrl, 0, wx.ALL|wx.EXPAND, 5)
         
+        # Narrow pad threshold
+        sizer.Add(wx.StaticText(self, label="Narrow Pad Threshold (mm):"), 0, wx.ALL, 5)
+        self.narrowThreshold_ctrl = wx.TextCtrl(self, value=str(narrowPadThreshold))
+        sizer.Add(self.narrowThreshold_ctrl, 0, wx.ALL|wx.EXPAND, 5)
+        
         # OK and Cancel buttons
         btn_sizer = wx.StdDialogButtonSizer()
         ok_btn = wx.Button(self, wx.ID_OK)
@@ -126,6 +140,7 @@ class StencilParametersDialog(wx.Dialog):
             maskWidth = float(self.maskWidth_ctrl.GetValue())
             padSize = float(self.padSize_ctrl.GetValue())
             clearance = float(self.clearance_ctrl.GetValue())
+            narrowThreshold = float(self.narrowThreshold_ctrl.GetValue())
             
             return {
                 'copperSelection': copperSelection,
@@ -133,7 +148,8 @@ class StencilParametersDialog(wx.Dialog):
                 'backCopperPads': copperSelection == 1,
                 'minGabBetweenPads': maskWidth,
                 'minPadSize': padSize,
-                'pcbCearance': clearance
+                'pcbCearance': clearance,
+                'narrowPadThreshold': narrowThreshold
             }
         except ValueError:
             wx.MessageBox("Please enter valid numbers for all numeric fields!", "Error")
@@ -156,12 +172,13 @@ class StencilGenerator(pcbnew.ActionPlugin):
         if dlg.ShowModal() == wx.ID_OK:
             values = dlg.getValues()
             if values:
-                global frontCopperPads, backCopperPads, minGabBetweenPads, minPadSize, pcbClearence, copperSelection
+                global frontCopperPads, backCopperPads, minGabBetweenPads, minPadSize, pcbClearence, copperSelection, narrowPadThreshold
                 copperSelection = values['copperSelection']
                 frontCopperPads = values['frontCopperPads']
                 backCopperPads = values['backCopperPads']
                 minGabBetweenPads = values['minGabBetweenPads']
                 minPadSize = values['minPadSize']
+                narrowPadThreshold = values['narrowPadThreshold']
                 pcbClearence = values['pcbCearance']
                 dlg.Destroy()
                 return True
@@ -201,7 +218,7 @@ class StencilGenerator(pcbnew.ActionPlugin):
                 return  # User cancelled, exit
 
             # Save configuration to INI file
-            saveConfigToIni(projectDir, minGabBetweenPads, minPadSize, pcbClearence)
+            saveConfigToIni(projectDir, minGabBetweenPads, minPadSize, pcbClearence, narrowPadThreshold)
             log("Configuration saved to INI file")
 
             baseFilename = re.sub(r'\.[^.]*$', '', os.path.basename(projectFile))
@@ -686,6 +703,103 @@ class StencilGenerator(pcbnew.ActionPlugin):
         
         return close_pads
 
+    def optimizeNarrowPads(self, padsInfo, groupShrinkFactors):
+        """Optimize narrow pads to maximize their width while respecting constraints"""
+        import math
+        
+        optimizedFactors = groupShrinkFactors.copy()
+        
+        for i, pad_info in enumerate(padsInfo):
+            # Check if this pad has any dimension below threshold
+            if min(pad_info['width'], pad_info['height']) < narrowPadThreshold:
+                # Find available space around this pad
+                availableSpaceX = self.calculateAvailableSpace(pad_info, padsInfo, i, 'x')
+                availableSpaceY = self.calculateAvailableSpace(pad_info, padsInfo, i, 'y')
+                
+                # Get current shrink factors
+                currentFactors = optimizedFactors.get(i, {'width': 1.0, 'height': 1.0})
+                
+                # Calculate current adjusted dimensions
+                currentWidth = pad_info['width'] * currentFactors['width']
+                currentHeight = pad_info['height'] * currentFactors['height']
+                
+                # Try to optimize width if it's narrow
+                if pad_info['width'] < narrowPadThreshold:
+                    # Calculate maximum possible width
+                    maxPossibleWidth = availableSpaceX
+                    if maxPossibleWidth > currentWidth:
+                        newWidthFactor = min(1.0, maxPossibleWidth / pad_info['width'])
+                        # Ensure we don't go below minimum pad size
+                        if pad_info['width'] * newWidthFactor >= minPadSize:
+                            optimizedFactors[i] = {
+                                'width': newWidthFactor,
+                                'height': currentFactors['height']
+                            }
+                
+                # Try to optimize height if it's narrow
+                if pad_info['height'] < narrowPadThreshold:
+                    # Calculate maximum possible height
+                    maxPossibleHeight = availableSpaceY
+                    if maxPossibleHeight > currentHeight:
+                        newHeightFactor = min(1.0, maxPossibleHeight / pad_info['height'])
+                        # Ensure we don't go below minimum pad size
+                        if pad_info['height'] * newHeightFactor >= minPadSize:
+                            currentFactors = optimizedFactors.get(i, {'width': 1.0, 'height': 1.0})
+                            optimizedFactors[i] = {
+                                'width': currentFactors['width'],
+                                'height': newHeightFactor
+                            }
+        
+        return optimizedFactors
+
+    def calculateAvailableSpace(self, targetPad, allPads, targetIndex, direction):
+        """Calculate available space around a pad in given direction"""
+        import math
+        
+        minDistance = float('inf')
+        
+        for i, pad in enumerate(allPads):
+            if i == targetIndex:
+                continue
+                
+            if direction == 'x':
+                # Check horizontal distance
+                dx = abs(pad['x'] - targetPad['x'])
+                dy = abs(pad['y'] - targetPad['y'])
+                
+                # Only consider pads that could interfere horizontally
+                # (overlapping in Y direction or close enough)
+                padOverlapY = (pad['height'] + targetPad['height']) / 2
+                if dy < padOverlapY + minGabBetweenPads:
+                    # Calculate edge-to-edge distance
+                    padDistance = dx - (pad['width'] + targetPad['width']) / 2
+                    if padDistance > minGabBetweenPads:
+                        # Available space is the distance minus required gap
+                        availableSpace = padDistance - minGabBetweenPads
+                        minDistance = min(minDistance, availableSpace)
+                        
+            else:  # direction == 'y'
+                # Check vertical distance
+                dx = abs(pad['x'] - targetPad['x'])
+                dy = abs(pad['y'] - targetPad['y'])
+                
+                # Only consider pads that could interfere vertically
+                # (overlapping in X direction or close enough)
+                padOverlapX = (pad['width'] + targetPad['width']) / 2
+                if dx < padOverlapX + minGabBetweenPads:
+                    # Calculate edge-to-edge distance
+                    padDistance = dy - (pad['height'] + targetPad['height']) / 2
+                    if padDistance > minGabBetweenPads:
+                        # Available space is the distance minus required gap
+                        availableSpace = padDistance - minGabBetweenPads
+                        minDistance = min(minDistance, availableSpace)
+        
+        # Return available space, or a reasonable maximum if no constraints found
+        if minDistance == float('inf'):
+            return narrowPadThreshold * 3  # Plenty of space available
+        else:
+            return max(0, minDistance)
+
 
     def projectPadDimension(self, pad_info, direction_x, direction_y):
         """Project pad's half-dimension onto a given direction"""
@@ -879,6 +993,8 @@ class StencilGenerator(pcbnew.ActionPlugin):
           shrinkFactors = self.calculateGroupShrinkFactor(groupIndices, padsInfo)
           for idx in groupIndices:
               groupShrinkFactors[idx] = shrinkFactors
+
+      groupShrinkFactors = self.optimizeNarrowPads(padsInfo, groupShrinkFactors)
 
       for i, pad_info in enumerate(padsInfo):
           shrinkFactors = groupShrinkFactors.get(i, {'width': 1.0, 'height': 1.0})
