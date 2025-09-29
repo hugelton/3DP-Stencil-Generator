@@ -11,7 +11,7 @@ import configparser
 
 
 # === Global configuration ===
-BUILD = "127"            # Build number
+BUILD = "129"            # Build number
 workDir = "stencil"      # Working folder name
 frontCopperPads = True # Generate front copper pads
 backCopperPads = False # Generate back copper pads
@@ -20,7 +20,7 @@ minGabBetweenPads = 0.20    # Minimum mask width (mm) between pads
 minPadSize = 0.40      # Minimum pad size (mm) after shrinking
 narrowPadThreshold = 1.0  # Threshold for narrow pad optimization (mm)
 pcbClearence = 0.15      # PCB clearance (mm) - moves outline outward from Edge.Cuts
-prySlotPosition = 0      # Pry slot position: 0=Top, 1=Right, 2=Bottom, 3=Left
+prySlotPosition = 4      # Pry slot position: 0=Top, 1=Right, 2=Bottom, 3=Left, 4=None
 
 import wx
 
@@ -63,7 +63,7 @@ def loadConfigFromIni(projectDir):
             
             if 'prySlotPosition' in settings:
                 value = int(settings['prySlotPosition'])
-                if 0 <= value <= 3:  # 0=Top, 1=Right, 2=Bottom, 3=Left
+                if 0 <= value <= 4:  # 0=Top, 1=Right, 2=Bottom, 3=Left, 4=None
                     prySlotPosition = value
         
         # make sure minPadSize is not smaller than narrowPadThreshold
@@ -134,7 +134,7 @@ class StencilParametersDialog(wx.Dialog):
         
         # Pry slot position
         sizer.Add(wx.StaticText(self, label="Pry Slot Position:"), 0, wx.ALL, 5)
-        self.prySlot_ctrl = wx.Choice(self, choices=["Top", "Right", "Bottom", "Left"])
+        self.prySlot_ctrl = wx.Choice(self, choices=["Top", "Right", "Bottom", "Left", "None"])
         self.prySlot_ctrl.SetSelection(prySlotPosition)
         sizer.Add(self.prySlot_ctrl, 0, wx.ALL|wx.EXPAND, 5)
         
@@ -671,9 +671,8 @@ class StencilGenerator(pcbnew.ActionPlugin):
           h = self.mm(bbox.GetHeight()) + 2 * pcbClearence
           baseScad = f"square([{w}, {h}], center=true)"
 
-      # Calculate PCB bounds for pry slot
-      pcbBounds = self.calculatePcbBounds(board)
-      prySlot = self.generatePrySlotForEdgeCuts(pcbBounds['width'], pcbBounds['height'])
+      # Generate pry slot that touches actual PCB outline
+      prySlot = self.generatePrySlotForEdgeCuts(board)
       
       if prySlot:
           scad = f"    union() {{\n        {baseScad};\n{prySlot}    }}\n"
@@ -684,48 +683,60 @@ class StencilGenerator(pcbnew.ActionPlugin):
       return scad
 
     def generatePrySlot(self, pcb_width, pcb_height):
-        """Generate semi-circular pry slot at selected edge position"""
+        """Generate semi-circular pry slot with rectangle at selected edge position (User.4 case)"""
         global prySlotPosition
         
         # Pry slot parameters (8mm diameter = 4mm radius)
         pry_radius = 4.0  # mm
-        
-        # Position slot at center of selected edge
+        pty_diameter = pry_radius * 2  # mm        
+        # Position slot at center of selected edge with union design: semi-circle + rectangle
         if prySlotPosition == 0:  # Top
             slot_x = 0.0
             slot_y = pcb_height / 2
-            # Semi-circle extending upward
-            scad = f"        translate([{slot_x}, {slot_y}]) intersection() {{\n"
-            scad += f"            circle(r={pry_radius});\n"
-            scad += f"            translate([0, {pry_radius/2}]) square([{pry_radius*2}, {pry_radius}], center=true);\n"
-            scad += "        }\n"
+            # Semi-circle extending upward + rectangle extending toward PCB (downward)
+            scad = f"        union() {{\n"
+            scad += f"            translate([{slot_x}, {slot_y}]) intersection() {{\n"
+            scad += f"                circle(r={pry_radius});\n"
+            scad += f"                translate([0, {pry_radius/2}]) square([{pry_diameter}, {pry_diameter}], center=true);\n"
+            scad += f"            }}\n"
+            scad += f"            translate([{slot_x}, {slot_y - pry_radius/2}]) square([{pry_radius*2}, {pry_radius*2}], center=true);\n"
+            scad += f"        }}\n"
             
         elif prySlotPosition == 1:  # Right
             slot_x = pcb_width / 2
             slot_y = 0.0
-            # Semi-circle extending rightward
-            scad = f"        translate([{slot_x}, {slot_y}]) intersection() {{\n"
-            scad += f"            circle(r={pry_radius});\n"
-            scad += f"            translate([{pry_radius/2}, 0]) square([{pry_radius}, {pry_radius*2}], center=true);\n"
-            scad += "        }\n"
+            # Semi-circle extending rightward + rectangle extending toward PCB (leftward)
+            scad = f"        union() {{\n"
+            scad += f"            translate([{slot_x}, {slot_y}]) intersection() {{\n"
+            scad += f"                circle(r={pry_radius});\n"
+            scad += f"                translate([{pry_radius/2}, 0]) square([{pry_radius}, {pry_diameter}], center=true);\n"
+            scad += f"            }}\n"
+            scad += f"            translate([{slot_x - pry_radius/2}, {slot_y}]) square([{pry_diameter}, {pry_diameter}], center=true);\n"
+            scad += f"        }}\n"
             
         elif prySlotPosition == 2:  # Bottom
             slot_x = 0.0
             slot_y = -pcb_height / 2
-            # Semi-circle extending downward
-            scad = f"        translate([{slot_x}, {slot_y}]) intersection() {{\n"
-            scad += f"            circle(r={pry_radius});\n"
-            scad += f"            translate([0, -{pry_radius/2}]) square([{pry_radius*2}, {pry_radius}], center=true);\n"
-            scad += "        }\n"
+            # Semi-circle extending downward + rectangle extending toward PCB (upward)
+            scad = f"        union() {{\n"
+            scad += f"            translate([{slot_x}, {slot_y}]) intersection() {{\n"
+            scad += f"                circle(r={pry_radius});\n"
+            scad += f"                translate([0, -{pry_radius/2}]) square([{pry_diameter}, {pry_radius}], center=true);\n"
+            scad += f"            }}\n"
+            scad += f"            translate([{slot_x}, {slot_y + pry_radius/2}]) square([{pry_diameter}, {pry_diameter}], center=true);\n"
+            scad += f"        }}\n"
             
         elif prySlotPosition == 3:  # Left
             slot_x = -pcb_width / 2
             slot_y = 0.0
-            # Semi-circle extending leftward
-            scad = f"        translate([{slot_x}, {slot_y}]) intersection() {{\n"
-            scad += f"            circle(r={pry_radius});\n"
-            scad += f"            translate([-{pry_radius/2}, 0]) square([{pry_radius}, {pry_radius*2}], center=true);\n"
-            scad += "        }\n"
+            # Semi-circle extending leftward + rectangle extending toward PCB (rightward)
+            scad = f"        union() {{\n"
+            scad += f"            translate([{slot_x}, {slot_y}]) intersection() {{\n"
+            scad += f"                circle(r={pry_radius});\n"
+            scad += f"                translate([-{pry_radius/2}, 0]) square([{pry_radius}, {pry_diameter}], center=true);\n"
+            scad += f"            }}\n"
+            scad += f"            translate([{slot_x + pry_radius/2}, {slot_y}]) square([{pry_diameter}, {pry_diameter}], center=true);\n"
+            scad += f"        }}\n"
             
         else:
             # Invalid position, return empty
@@ -733,12 +744,171 @@ class StencilGenerator(pcbnew.ActionPlugin):
         
         return scad
 
-    def generatePrySlotForEdgeCuts(self, pcb_width, pcb_height):
-        """Generate semi-circular pry slot for Edge.Cuts outline (handles back copper mirroring)"""
+    def findActualEdgePoint(self, board, direction):
+        """Find the actual PCB edge point in the specified direction
+        
+        Args:
+            board: KiCad board object
+            direction: 0=Top, 1=Right, 2=Bottom, 3=Left
+            
+        Returns:
+            (x, y) coordinates of the edge point in mm relative to center
+        """
+        # Get center coordinates
+        pcbRect = self.findShapeOnLayer(board, pcbnew.User_4)
+        if pcbRect:
+            centerX = pcbRect[0] + pcbRect[2]/2
+            centerY = pcbRect[1] + pcbRect[3]/2
+        else:
+            bbox = board.GetBoundingBox()
+            centerX = bbox.GetCenter().x
+            centerY = bbox.GetCenter().y
+
+        # Collect all Edge.Cuts points
+        edge_points = []
+        
+        for drawing in board.GetDrawings():
+            if drawing.GetLayer() == pcbnew.Edge_Cuts and isinstance(drawing, pcbnew.PCB_SHAPE):
+                shapeType = drawing.GetShape()
+                
+                if shapeType == pcbnew.SHAPE_T_SEGMENT:
+                    start = drawing.GetStart()
+                    end = drawing.GetEnd()
+                    edge_points.extend([
+                        (self.mm(start.x - centerX), self.mm(start.y - centerY)),
+                        (self.mm(end.x - centerX), self.mm(end.y - centerY))
+                    ])
+                    
+                elif shapeType == pcbnew.SHAPE_T_CIRCLE:
+                    center_circle = drawing.GetCenter()
+                    radius = drawing.GetRadius()
+                    cx = self.mm(center_circle.x - centerX)
+                    cy = self.mm(center_circle.y - centerY)
+                    r = self.mm(radius)
+                    
+                    # Add points around the circle
+                    import math
+                    for angle in range(0, 360, 10):
+                        rad = math.radians(angle)
+                        x = cx + r * math.cos(rad)
+                        y = cy + r * math.sin(rad)
+                        edge_points.append((x, y))
+                        
+                elif shapeType == pcbnew.SHAPE_T_RECT:
+                    start = drawing.GetStart()
+                    end = drawing.GetEnd()
+                    x1, y1 = self.mm(start.x - centerX), self.mm(start.y - centerY)
+                    x2, y2 = self.mm(end.x - centerX), self.mm(end.y - centerY)
+                    
+                    # Add rectangle corners
+                    edge_points.extend([
+                        (x1, y1), (x2, y1), (x2, y2), (x1, y2)
+                    ])
+                    
+                elif shapeType == pcbnew.SHAPE_T_ARC:
+                    center_arc = drawing.GetCenter()
+                    start = drawing.GetStart()
+                    end = drawing.GetEnd()
+                    import math
+                    
+                    cx = self.mm(center_arc.x - centerX)
+                    cy = self.mm(center_arc.y - centerY)
+                    sx = self.mm(start.x - centerX)
+                    sy = self.mm(start.y - centerY)
+                    ex = self.mm(end.x - centerX)
+                    ey = self.mm(end.y - centerY)
+                    
+                    radius = math.sqrt((sx - cx)**2 + (sy - cy)**2)
+                    startAngle = math.atan2(sy - cy, sx - cx)
+                    endAngle = math.atan2(ey - cy, ex - cx)
+                    
+                    # Add points along the arc
+                    num_segments = max(8, int(abs(endAngle - startAngle) * 180 / math.pi / 10))
+                    if endAngle < startAngle:
+                        endAngle += 2 * math.pi
+                        
+                    for i in range(num_segments + 1):
+                        angle = startAngle + (endAngle - startAngle) * i / num_segments
+                        x = cx + radius * math.cos(angle)
+                        y = cy + radius * math.sin(angle)
+                        edge_points.append((x, y))
+
+        if not edge_points:
+            # Fallback to bounding box if no Edge.Cuts found
+            pcbBounds = self.calculatePcbBounds(board)
+            if direction == 0:  # Top
+                return (0.0, pcbBounds['height'] / 2)
+            elif direction == 1:  # Right
+                return (pcbBounds['width'] / 2, 0.0)
+            elif direction == 2:  # Bottom
+                return (0.0, -pcbBounds['height'] / 2)
+            elif direction == 3:  # Left
+                return (-pcbBounds['width'] / 2, 0.0)
+
+        # Find the actual edge point based on direction
+        if direction == 0:  # Top - find highest Y point, prefer center X area
+            # First try to find points in center area (within 5mm of center X)
+            center_points = [(x, y) for x, y in edge_points if abs(x) <= 5.0]
+            if center_points:
+                # Find highest Y in center area
+                edge_y = max(point[1] for point in center_points)
+                # Find the X coordinate of this highest point (or closest to center)
+                candidates = [(x, y) for x, y in center_points if abs(y - edge_y) <= 0.1]
+                if candidates:
+                    edge_x = min(candidates, key=lambda p: abs(p[0]))[0]  # Closest to center X
+                    return (edge_x, edge_y)
+            # Fallback: find highest Y overall
+            edge_y = max(point[1] for point in edge_points)
+            return (0.0, edge_y)
+                
+        elif direction == 1:  # Right - find rightmost X point, prefer center Y area
+            center_points = [(x, y) for x, y in edge_points if abs(y) <= 5.0]
+            if center_points:
+                edge_x = max(point[0] for point in center_points)
+                # Find Y coordinate of this rightmost point (or closest to center)
+                candidates = [(x, y) for x, y in center_points if abs(x - edge_x) <= 0.1]
+                if candidates:
+                    edge_y = min(candidates, key=lambda p: abs(p[1]))[1]  # Closest to center Y
+                    return (edge_x, edge_y)
+            # Fallback: find rightmost X overall
+            edge_x = max(point[0] for point in edge_points)
+            return (edge_x, 0.0)
+                
+        elif direction == 2:  # Bottom - find lowest Y point, prefer center X area
+            center_points = [(x, y) for x, y in edge_points if abs(x) <= 5.0]
+            if center_points:
+                edge_y = min(point[1] for point in center_points)
+                # Find X coordinate of this lowest point (or closest to center)
+                candidates = [(x, y) for x, y in center_points if abs(y - edge_y) <= 0.1]
+                if candidates:
+                    edge_x = min(candidates, key=lambda p: abs(p[0]))[0]  # Closest to center X
+                    return (edge_x, edge_y)
+            # Fallback: find lowest Y overall
+            edge_y = min(point[1] for point in edge_points)
+            return (0.0, edge_y)
+                
+        elif direction == 3:  # Left - find leftmost X point, prefer center Y area
+            center_points = [(x, y) for x, y in edge_points if abs(y) <= 5.0]
+            if center_points:
+                edge_x = min(point[0] for point in center_points)
+                # Find Y coordinate of this leftmost point (or closest to center)
+                candidates = [(x, y) for x, y in center_points if abs(x - edge_x) <= 0.1]
+                if candidates:
+                    edge_y = min(candidates, key=lambda p: abs(p[1]))[1]  # Closest to center Y
+                    return (edge_x, edge_y)
+            # Fallback: find leftmost X overall
+            edge_x = min(point[0] for point in edge_points)
+            return (edge_x, 0.0)
+        
+        return (0.0, 0.0)  # Fallback
+
+    def generatePrySlotForEdgeCuts(self, board):
+        """Generate semi-circular pry slot that touches the actual PCB outline"""
         global prySlotPosition
         
         # Pry slot parameters (8mm diameter = 4mm radius)
         pry_radius = 4.0  # mm
+        pry_diameter = pry_radius * 2  # mm
         
         # Adjust position based on back copper mirroring
         if backCopperPads:
@@ -752,42 +922,65 @@ class StencilGenerator(pcbnew.ActionPlugin):
         else:
             effective_position = prySlotPosition
         
-        # Position slot at center of selected edge
+        # Find the actual edge point
+        edge_x, edge_y = self.findActualEdgePoint(board, effective_position)
+        
+        # Apply back copper X-mirroring to edge point if needed
+        if backCopperPads and effective_position in [1, 3]:
+            edge_x = -edge_x
+        
+        # Position slot center AT the edge with improved design: semi-circle + rectangle toward PCB
         if effective_position == 0:  # Top
-            slot_x = 0.0
-            slot_y = pcb_height / 2
-            # Semi-circle extending upward
-            scad = f"        translate([{slot_x}, {slot_y}]) intersection() {{\n"
-            scad += f"            circle(r={pry_radius});\n"
-            scad += f"            translate([0, {pry_radius/2}]) square([{pry_radius*2}, {pry_radius}], center=true);\n"
-            scad += "        }\n"
+            slot_x = edge_x
+            slot_y = edge_y
+            # Semi-circle extending upward + rectangle extending toward PCB (downward)
+            scad = f"        union() {{\n"
+            scad += f"            translate([{slot_x}, {slot_y}]) intersection() {{\n"
+            scad += f"                circle(r={pry_radius});\n"
+            scad += f"                translate([0, {pry_radius/2}]) square([{pry_diameter}, {pry_diameter}], center=true);\n"
+            scad += f"            }}\n"
+            scad += f"            translate([{slot_x}, {slot_y - pry_radius/2}]) square([{pry_diameter}, {pry_diameter}], center=true);\n"
+            scad += f"        }}\n"
             
         elif effective_position == 1:  # Right
-            slot_x = pcb_width / 2
-            slot_y = 0.0
-            # Semi-circle extending rightward
-            scad = f"        translate([{slot_x}, {slot_y}]) intersection() {{\n"
-            scad += f"            circle(r={pry_radius});\n"
-            scad += f"            translate([{pry_radius/2}, 0]) square([{pry_radius}, {pry_radius*2}], center=true);\n"
-            scad += "        }\n"
+            slot_x = edge_x
+            slot_y = edge_y
+            # Semi-circle extending rightward + rectangle extending toward PCB (leftward)
+            scad = f"        union() {{\n"
+            scad += f"            translate([{slot_x}, {slot_y}]) intersection() {{\n"
+            scad += f"                circle(r={pry_radius});\n"
+            scad += f"                translate([{pry_radius/2}, 0]) square([{pry_diameter}, {pry_diameter}], center=true);\n"
+            scad += f"            }}\n"
+            scad += f"            translate([{slot_x - pry_radius/2}, {slot_y}]) square([{pry_diameter}, {pry_diameter}], center=true);\n"
+            scad += f"        }}\n"
             
         elif effective_position == 2:  # Bottom
-            slot_x = 0.0
-            slot_y = -pcb_height / 2
-            # Semi-circle extending downward
-            scad = f"        translate([{slot_x}, {slot_y}]) intersection() {{\n"
-            scad += f"            circle(r={pry_radius});\n"
-            scad += f"            translate([0, -{pry_radius/2}]) square([{pry_radius*2}, {pry_radius}], center=true);\n"
-            scad += "        }\n"
+            slot_x = edge_x
+            slot_y = edge_y
+            # Semi-circle extending downward + rectangle extending toward PCB (upward)
+            scad = f"        union() {{\n"
+            scad += f"            translate([{slot_x}, {slot_y}]) intersection() {{\n"
+            scad += f"                circle(r={pry_radius});\n"
+            scad += f"                translate([0, -{pry_radius/2}]) square([{pry_diameter}, {pry_diameter}], center=true);\n"
+            scad += f"            }}\n"
+            scad += f"            translate([{slot_x}, {slot_y + pry_radius/2}]) square([{pry_diameter}, {pry_diameter}], center=true);\n"
+            scad += f"        }}\n"
             
-        elif effective_position == 3:  # Left
-            slot_x = -pcb_width / 2
-            slot_y = 0.0
-            # Semi-circle extending leftward
-            scad = f"        translate([{slot_x}, {slot_y}]) intersection() {{\n"
-            scad += f"            circle(r={pry_radius});\n"
-            scad += f"            translate([-{pry_radius/2}, 0]) square([{pry_radius}, {pry_radius*2}], center=true);\n"
-            scad += "        }\n"
+        elif effective_position == 3:  # Left - FIXED: ensure negative X coordinates
+            # Make sure we get the leftmost (negative) coordinate
+            if edge_x > 0:
+                slot_x = -edge_x  # Convert positive to negative for left side
+            else:
+                slot_x = edge_x   # Already negative, use as-is
+            slot_y = edge_y
+            # Semi-circle extending leftward + rectangle extending toward PCB (rightward)
+            scad = f"        union() {{\n"
+            scad += f"            translate([{slot_x}, {slot_y}]) intersection() {{\n"
+            scad += f"                circle(r={pry_radius});\n"
+            scad += f"                translate([-{pry_radius/2}, 0]) square([{pry_diameter}, {pry_diameter}], center=true);\n"
+            scad += f"            }}\n"
+            scad += f"            translate([{slot_x + pry_radius/2}, {slot_y}]) square([{pry_diameter}, {pry_diameter}], center=true);\n"
+            scad += f"        }}\n"
             
         else:
             # Invalid position, return empty

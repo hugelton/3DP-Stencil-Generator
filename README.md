@@ -27,13 +27,16 @@ My contributions primarily focus on adding support for PCB outlines, refining th
 In the `__init__.py` program you can tweak some settings to your needs.
 <pre>
 # === Global configuration ===
-BUILD               = "128"         # Build number
-workDir             = "stencil"     # Working folder name
-copperSelection     = 0             # 0 = front, 1 = back
-minGabBetweenPads   = 0.20          # Minimum mask width (mm) between pads
-minPadSize          = 0.40          # Minimum pad size (mm) after shrinking
-narrowPadThreshold  = 1.0           # Threshold for narrow pad optimization (mm)
-pcbClearence        = 0.15          # PCB clearance (mm) - moves outline outward from Edge.Cuts
+BUILD = "129"            # Build number
+workDir = "stencil"      # Working folder name
+frontCopperPads = True # Generate front copper pads
+backCopperPads = False # Generate back copper pads
+copperSelection = 0     # 0 = front, 1 = back
+minGabBetweenPads = 0.20    # Minimum mask width (mm) between pads
+minPadSize = 0.40      # Minimum pad size (mm) after shrinking
+narrowPadThreshold = 1.0  # Threshold for narrow pad optimization (mm)
+pcbClearence = 0.15      # PCB clearance (mm) - moves outline outward from Edge.Cuts
+prySlotPosition = 4      # Pry slot position: 0=Top, 1=Right, 2=Bottom, 3=Left, 4=None
 </pre>
 
 ## Usage
