@@ -1,6 +1,11 @@
 # 3DP-Stencil-Generator
 KiCad 3D Printable Stencil Generator Plugin
 
+## Acknowledgements
+This repository is derived from the original work by **Leo Kuroshita** ([Hugelton](https://github.com/hugelton)), creator of the [3DP-Stencil-Generator](https://github.com/hugelton/3DP-Stencil-Generator).  
+Many thanks to him for making the code available as open source.  
+My contributions primarily focus on adding support for PCB outlines, refining the handling of small pads, and introducing differentiation between the front and back sides of the PCB.
+
 ## Features
 
 - Generates a stencil frame based on the Edge.Cuts (PCB outline) or User.3 layer
@@ -22,13 +27,13 @@ KiCad 3D Printable Stencil Generator Plugin
 In the `__init__.py` program you can tweak some settings to your needs.
 <pre>
 # === Global configuration ===
-BUILD = "121"            # Build number
-workDir = "stencil"      # Working folder name
-front_copper_pads = True # Generate front copper pads
-back_copper_pads = False # Generate back copper pads
-min_mask_width = 0.40    # Minimum mask width (mm) between pads
-min_pad_size = 0.40      # Minimum pad size (mm) after shrinking
-pcbClearance = 0.15      # PCB clearance (mm) - moves outline outward from Edge.Cuts
+BUILD               = "128"         # Build number
+workDir             = "stencil"     # Working folder name
+copperSelection     = 0             # 0 = front, 1 = back
+minGabBetweenPads   = 0.20          # Minimum mask width (mm) between pads
+minPadSize          = 0.40          # Minimum pad size (mm) after shrinking
+narrowPadThreshold  = 1.0           # Threshold for narrow pad optimization (mm)
+pcbClearence        = 0.15          # PCB clearance (mm) - moves outline outward from Edge.Cuts
 </pre>
 
 ## Usage
