@@ -20,12 +20,13 @@ minGabBetweenPads = 0.20    # Minimum mask width (mm) between pads
 minPadSize = 0.40      # Minimum pad size (mm) after shrinking
 narrowPadThreshold = 1.0  # Threshold for narrow pad optimization (mm)
 pcbClearence = 0.15      # PCB clearance (mm) - moves outline outward from Edge.Cuts
+prySlotPosition = 0      # Pry slot position: 0=Top, 1=Right, 2=Bottom, 3=Left
 
 import wx
 
 def loadConfigFromIni(projectDir):
     """Load configuration from 3dpStencil.ini file"""
-    global minGabBetweenPads, minPadSize, pcbClearence, narrowPadThreshold
+    global minGabBetweenPads, minPadSize, pcbClearence, narrowPadThreshold, prySlotPosition
     
     config_file = os.path.join(projectDir, workDir, "3dpStencil.ini")
     
@@ -59,6 +60,11 @@ def loadConfigFromIni(projectDir):
                 value = float(settings['narrowPadThreshold'])
                 if 0.1 <= value <= 5.0:  # Reasonable range
                     narrowPadThreshold = value
+            
+            if 'prySlotPosition' in settings:
+                value = int(settings['prySlotPosition'])
+                if 0 <= value <= 3:  # 0=Top, 1=Right, 2=Bottom, 3=Left
+                    prySlotPosition = value
         
         # make sure minPadSize is not smaller than narrowPadThreshold
         if minPadSize < narrowPadThreshold:
@@ -69,7 +75,7 @@ def loadConfigFromIni(projectDir):
         print(f"Warning: Could not load config from {config_file}: {e}")
 
 
-def saveConfigToIni(projectDir, maskWidth, padSize, clearance, narrowThreshold):
+def saveConfigToIni(projectDir, maskWidth, padSize, clearance, narrowThreshold, prySlot):
     """Save configuration to 3dpStencil.ini file"""
     config_dir = os.path.join(projectDir, workDir)
     config_file = os.path.join(config_dir, "3dpStencil.ini")
@@ -84,7 +90,8 @@ def saveConfigToIni(projectDir, maskWidth, padSize, clearance, narrowThreshold):
             'minGabBetweenPads': str(maskWidth),
             'minPadSize': str(padSize),
             'pcbCearance': str(clearance),
-            'narrowPadThreshold': str(narrowThreshold)
+            'narrowPadThreshold': str(narrowThreshold),
+            'prySlotPosition': str(prySlot)
         }
         
         # Write config file
@@ -125,6 +132,12 @@ class StencilParametersDialog(wx.Dialog):
         self.narrowThreshold_ctrl = wx.TextCtrl(self, value=str(narrowPadThreshold))
         sizer.Add(self.narrowThreshold_ctrl, 0, wx.ALL|wx.EXPAND, 5)
         
+        # Pry slot position
+        sizer.Add(wx.StaticText(self, label="Pry Slot Position:"), 0, wx.ALL, 5)
+        self.prySlot_ctrl = wx.Choice(self, choices=["Top", "Right", "Bottom", "Left"])
+        self.prySlot_ctrl.SetSelection(prySlotPosition)
+        sizer.Add(self.prySlot_ctrl, 0, wx.ALL|wx.EXPAND, 5)
+        
         # OK and Cancel buttons
         btn_sizer = wx.StdDialogButtonSizer()
         ok_btn = wx.Button(self, wx.ID_OK)
@@ -158,7 +171,8 @@ class StencilParametersDialog(wx.Dialog):
                 'minGabBetweenPads': maskWidth,
                 'minPadSize': padSize,
                 'pcbCearance': clearance,
-                'narrowPadThreshold': narrowThreshold
+                'narrowPadThreshold': narrowThreshold,
+                'prySlotPosition': self.prySlot_ctrl.GetSelection()
             }
         except ValueError:
             wx.MessageBox("Please enter valid numbers for all numeric fields!", "Error")
@@ -198,7 +212,7 @@ class StencilGenerator(pcbnew.ActionPlugin):
         if dlg.ShowModal() == wx.ID_OK:
             values = dlg.getValues()
             if values:
-                global frontCopperPads, backCopperPads, minGabBetweenPads, minPadSize, pcbClearence, copperSelection, narrowPadThreshold
+                global frontCopperPads, backCopperPads, minGabBetweenPads, minPadSize, pcbClearence, copperSelection, narrowPadThreshold, prySlotPosition
                 copperSelection = values['copperSelection']
                 frontCopperPads = values['frontCopperPads']
                 backCopperPads = values['backCopperPads']
@@ -206,6 +220,7 @@ class StencilGenerator(pcbnew.ActionPlugin):
                 minPadSize = values['minPadSize']
                 narrowPadThreshold = values['narrowPadThreshold']
                 pcbClearence = values['pcbCearance']
+                prySlotPosition = values['prySlotPosition']
                 dlg.Destroy()
                 return True
         dlg.Destroy()
@@ -244,7 +259,7 @@ class StencilGenerator(pcbnew.ActionPlugin):
                 return  # User cancelled, exit
 
             # Save configuration to INI file
-            saveConfigToIni(projectDir, minGabBetweenPads, minPadSize, pcbClearence, narrowPadThreshold)
+            saveConfigToIni(projectDir, minGabBetweenPads, minPadSize, pcbClearence, narrowPadThreshold, prySlotPosition)
             log("Configuration saved to INI file")
 
             baseFilename = re.sub(r'\.[^.]*$', '', os.path.basename(projectFile))
@@ -612,7 +627,7 @@ class StencilGenerator(pcbnew.ActionPlugin):
                   for i in range(len(arcPoints) - 1):
                       lineSegments.append([arcPoints[i], arcPoints[i + 1]])
 
-      scad = ""
+      baseScad = ""
       if lineSegments:
           polygonPoints = self.connectLineSegments(lineSegments)
           if polygonPoints:
@@ -620,7 +635,7 @@ class StencilGenerator(pcbnew.ActionPlugin):
               if backCopperPads:
                   polygonPoints = [(-x, y) for x, y in polygonPoints][::-1]
               pointsStr = ",".join([f"[{x},{y}]" for x, y in polygonPoints])
-              scad += f"    offset(r={pcbClearence}) polygon(points=[{pointsStr}]);\n"
+              baseScad += f"offset(r={pcbClearence}) polygon(points=[{pointsStr}])"
           else:
               for segment in lineSegments:
                   (x1, y1), (x2, y2) = segment
@@ -636,28 +651,149 @@ class StencilGenerator(pcbnew.ActionPlugin):
                       shapes.append(f"translate([{cx}, {cy}]) rotate([0, 0, {angle}]) square([{length}, {lineWidth}], center=true)")
 
       if shapes:
-          if scad:
-              scad = f"    union() {{\n{scad}"
+          if baseScad:
+              baseScad = f"union() {{\n        {baseScad};\n"
               for shape in shapes:
-                  scad += f"        {shape};\n"
-              scad += "    }\n"
+                  baseScad += f"        {shape};\n"
+              baseScad += "    }"
           else:
               if len(shapes) == 1:
-                  scad = f"    {shapes[0]};\n"
+                  baseScad = shapes[0]
               else:
-                  scad = "    union() {\n"
+                  baseScad = "union() {\n"
                   for shape in shapes:
-                      scad += f"        {shape};\n"
-                  scad += "    }\n"
+                      baseScad += f"        {shape};\n"
+                  baseScad += "    }"
 
-      if not scad:
+      if not baseScad:
           bbox = board.GetBoundingBox()
           w = self.mm(bbox.GetWidth()) + 2 * pcbClearence
           h = self.mm(bbox.GetHeight()) + 2 * pcbClearence
-          scad = f"    square([{w}, {h}], center=true);\n"
+          baseScad = f"square([{w}, {h}], center=true)"
+
+      # Calculate PCB bounds for pry slot
+      pcbBounds = self.calculatePcbBounds(board)
+      prySlot = self.generatePrySlotForEdgeCuts(pcbBounds['width'], pcbBounds['height'])
+      
+      if prySlot:
+          scad = f"    union() {{\n        {baseScad};\n{prySlot}    }}\n"
+      else:
+          scad = f"    {baseScad};\n"
 
       log("=== Edge.Cuts analysis complete ===")
       return scad
+
+    def generatePrySlot(self, pcb_width, pcb_height):
+        """Generate semi-circular pry slot at selected edge position"""
+        global prySlotPosition
+        
+        # Pry slot parameters (8mm diameter = 4mm radius)
+        pry_radius = 4.0  # mm
+        
+        # Position slot at center of selected edge
+        if prySlotPosition == 0:  # Top
+            slot_x = 0.0
+            slot_y = pcb_height / 2
+            # Semi-circle extending upward
+            scad = f"        translate([{slot_x}, {slot_y}]) intersection() {{\n"
+            scad += f"            circle(r={pry_radius});\n"
+            scad += f"            translate([0, {pry_radius/2}]) square([{pry_radius*2}, {pry_radius}], center=true);\n"
+            scad += "        }\n"
+            
+        elif prySlotPosition == 1:  # Right
+            slot_x = pcb_width / 2
+            slot_y = 0.0
+            # Semi-circle extending rightward
+            scad = f"        translate([{slot_x}, {slot_y}]) intersection() {{\n"
+            scad += f"            circle(r={pry_radius});\n"
+            scad += f"            translate([{pry_radius/2}, 0]) square([{pry_radius}, {pry_radius*2}], center=true);\n"
+            scad += "        }\n"
+            
+        elif prySlotPosition == 2:  # Bottom
+            slot_x = 0.0
+            slot_y = -pcb_height / 2
+            # Semi-circle extending downward
+            scad = f"        translate([{slot_x}, {slot_y}]) intersection() {{\n"
+            scad += f"            circle(r={pry_radius});\n"
+            scad += f"            translate([0, -{pry_radius/2}]) square([{pry_radius*2}, {pry_radius}], center=true);\n"
+            scad += "        }\n"
+            
+        elif prySlotPosition == 3:  # Left
+            slot_x = -pcb_width / 2
+            slot_y = 0.0
+            # Semi-circle extending leftward
+            scad = f"        translate([{slot_x}, {slot_y}]) intersection() {{\n"
+            scad += f"            circle(r={pry_radius});\n"
+            scad += f"            translate([-{pry_radius/2}, 0]) square([{pry_radius}, {pry_radius*2}], center=true);\n"
+            scad += "        }\n"
+            
+        else:
+            # Invalid position, return empty
+            return ""
+        
+        return scad
+
+    def generatePrySlotForEdgeCuts(self, pcb_width, pcb_height):
+        """Generate semi-circular pry slot for Edge.Cuts outline (handles back copper mirroring)"""
+        global prySlotPosition
+        
+        # Pry slot parameters (8mm diameter = 4mm radius)
+        pry_radius = 4.0  # mm
+        
+        # Adjust position based on back copper mirroring
+        if backCopperPads:
+            # For back copper: mirror left/right positions
+            if prySlotPosition == 1:  # Right becomes Left
+                effective_position = 3
+            elif prySlotPosition == 3:  # Left becomes Right
+                effective_position = 1
+            else:
+                effective_position = prySlotPosition  # Top/Bottom unchanged
+        else:
+            effective_position = prySlotPosition
+        
+        # Position slot at center of selected edge
+        if effective_position == 0:  # Top
+            slot_x = 0.0
+            slot_y = pcb_height / 2
+            # Semi-circle extending upward
+            scad = f"        translate([{slot_x}, {slot_y}]) intersection() {{\n"
+            scad += f"            circle(r={pry_radius});\n"
+            scad += f"            translate([0, {pry_radius/2}]) square([{pry_radius*2}, {pry_radius}], center=true);\n"
+            scad += "        }\n"
+            
+        elif effective_position == 1:  # Right
+            slot_x = pcb_width / 2
+            slot_y = 0.0
+            # Semi-circle extending rightward
+            scad = f"        translate([{slot_x}, {slot_y}]) intersection() {{\n"
+            scad += f"            circle(r={pry_radius});\n"
+            scad += f"            translate([{pry_radius/2}, 0]) square([{pry_radius}, {pry_radius*2}], center=true);\n"
+            scad += "        }\n"
+            
+        elif effective_position == 2:  # Bottom
+            slot_x = 0.0
+            slot_y = -pcb_height / 2
+            # Semi-circle extending downward
+            scad = f"        translate([{slot_x}, {slot_y}]) intersection() {{\n"
+            scad += f"            circle(r={pry_radius});\n"
+            scad += f"            translate([0, -{pry_radius/2}]) square([{pry_radius*2}, {pry_radius}], center=true);\n"
+            scad += "        }\n"
+            
+        elif effective_position == 3:  # Left
+            slot_x = -pcb_width / 2
+            slot_y = 0.0
+            # Semi-circle extending leftward
+            scad = f"        translate([{slot_x}, {slot_y}]) intersection() {{\n"
+            scad += f"            circle(r={pry_radius});\n"
+            scad += f"            translate([-{pry_radius/2}, 0]) square([{pry_radius}, {pry_radius*2}], center=true);\n"
+            scad += "        }\n"
+            
+        else:
+            # Invalid position, return empty
+            return ""
+        
+        return scad
 
     def generatePcbOutline(self, board):
         log = getattr(self, 'log_function', lambda msg: print(f"DEBUG: {msg}"))
@@ -665,7 +801,12 @@ class StencilGenerator(pcbnew.ActionPlugin):
         pcbRect = self.findShapeOnLayer(board, pcbnew.User_4)
         if pcbRect:
             log("Using User.4 rectangle for PCB outline")
-            scad = f"    square([{self.mm(pcbRect[2])}, {self.mm(pcbRect[3])}], center=true);\n"
+            baseOutline = f"square([{self.mm(pcbRect[2])}, {self.mm(pcbRect[3])}], center=true)"
+            prySlot = self.generatePrySlot(self.mm(pcbRect[2]), self.mm(pcbRect[3]))
+            if prySlot:
+                scad = f"    union() {{\n        {baseOutline};\n{prySlot}    }}\n"
+            else:
+                scad = f"    {baseOutline};\n"
             return scad
         else:
             log("No User.4 rectangle found, falling back to Edge.Cuts")
